@@ -28,11 +28,15 @@ from telegram.ext import (
     filters,
 )
 
+import asyncio
+import math
+
 from config import BOT_TOKEN, FEE_RESERVE_SOL, ADMIN_USER_ID, USDT_MINT
 from wallet_manager import WalletManager
 from sniffer import MarketSniffer, format_currency
 from jupiter_swap import JupiterSwapEngine
-import math
+from copy_engine import SettingsManager, CopyTradingEngine
+from ai_engine import AITradingEngine
 
 # Logging configuration
 logging.basicConfig(
@@ -41,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# State tracking for user inputs (custom buy, withdraw, custom swap)
+# State tracking for user inputs (custom buy, withdraw, custom swap, import wallet, etc.)
 USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 # Active admin ID
@@ -60,28 +64,46 @@ def parse_positive_float(val: str, max_val: float = 1_000_000.0) -> Optional[flo
 
 
 def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Builds clean, simple introduction and main dashboard"""
+    """Builds clean, simple introduction and main dashboard with active mode badge"""
     pubkey, _ = WalletManager.get_or_create_wallet(user_id)
     sol_bal = WalletManager.get_sol_balance(pubkey)
     usdt_bal = WalletManager.get_usdt_balance(pubkey)
 
+    settings = SettingsManager.get_user_settings(user_id)
+    mode = settings.get("mode", "MANUAL")
+
+    if mode == "COPY":
+        target = settings.get("target_wallet", "")
+        target_display = f"<code>{target[:6]}...{target[-4:]}</code>" if target else "<i>(target not set)</i>"
+        mode_badge = f"🎯 <b>Copy Trading</b> ({target_display})"
+    elif mode == "AI":
+        strategy = settings.get("ai_strategy", "BALANCED")
+        mode_badge = f"🤖 <b>AI Autopilot</b> (<code>{strategy}</code>)"
+    else:
+        mode_badge = "⏸️ <b>Manual Sniper</b>"
+
     text = (
         "🐕🔎 <b>Market Sniffer</b>\n"
-        "<i>Fast Solana Sniper & Safety Auditor</i>\n\n"
+        "<i>Solana Sniper, Copy & AI Auto-Trader</i>\n\n"
         "Paste any <b>Token Contract Address (CA)</b> to audit safety and trade instantly.\n\n"
         "📬 <b>Your Trading Wallet:</b>\n"
         f"<code>{pubkey}</code> <i>(tap to copy)</i>\n\n"
         f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n"
+        f"🎮 <b>Active Mode:</b> {mode_badge}\n"
     )
 
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⚡ Swap SOL ⇄ USDT", callback_data="swap_menu"),
-            InlineKeyboardButton("💳 Wallet & Withdraw", callback_data="wallet_menu"),
+            InlineKeyboardButton("🎯 Copy Trading", callback_data="copy_menu"),
+            InlineKeyboardButton("🤖 AI Autopilot", callback_data="ai_menu"),
         ],
         [
-            InlineKeyboardButton("🔄 Refresh Balance", callback_data="refresh_balance"),
+            InlineKeyboardButton("⚡ Swap SOL ⇄ USDT", callback_data="swap_menu"),
             InlineKeyboardButton("🎒 My Positions", callback_data="positions_menu"),
+        ],
+        [
+            InlineKeyboardButton("💳 Wallet & Funds", callback_data="wallet_menu"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="refresh_balance"),
         ]
     ])
     return text, markup
@@ -106,6 +128,104 @@ def format_swap_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         ],
         [
             InlineKeyboardButton("🔄 Swap USDT ➡️ SOL", callback_data="swap_usdt_to_sol_menu"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
+        ]
+    ])
+    return text, markup
+
+
+def format_copy_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds Copy Trading Dashboard"""
+    settings = SettingsManager.get_user_settings(user_id)
+    mode = settings.get("mode", "MANUAL")
+    is_active = (mode == "COPY")
+    target = settings.get("target_wallet", "")
+    target_str = f"<code>{target}</code>" if target else "<i>None (Tap button below to set)</i>"
+    amount = settings.get("copy_buy_amount_sol", 0.1)
+    copy_sells = settings.get("copy_sells", True)
+    slippage = settings.get("slippage_bps", 300) / 100.0
+
+    status_str = "🟢 <b>ACTIVE (Copying Target)</b>" if is_active else "⏸️ <b>PAUSED (Manual Mode)</b>"
+
+    text = (
+        "🎯 <b>COPY TRADING DASHBOARD</b>\n"
+        "<i>Automatically mirror on-chain whale & insider trades</i>\n\n"
+        f"📊 <b>Engine Status:</b> {status_str}\n"
+        f"👤 <b>Target Wallet to Copy:</b>\n{target_str}\n\n"
+        f"💸 <b>Copied Buy Size:</b> <code>{amount:.2f} SOL</code>\n"
+        f"🔴 <b>Mirror Target Sells:</b> {'🟢 Yes (Auto-Sell 100%)' if copy_sells else '⚪ No (Manual Sell)'}\n"
+        f"⚡ <b>Slippage Tolerance:</b> <code>{slippage:.1f}%</code>\n\n"
+        "💡 <i>When active, the bot detects new swap transactions by the target wallet on Raydium, Pump.fun, or Jupiter and automatically executes the mirrored trade for you.</i>"
+    )
+
+    toggle_btn_text = "⏸️ Pause Copy Mode" if is_active else "▶️ Activate Copy Mode"
+    toggle_sells_text = "🔴 Auto-Sells: ON" if copy_sells else "⚪ Auto-Sells: OFF"
+
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(toggle_btn_text, callback_data="toggle_copy_mode"),
+        ],
+        [
+            InlineKeyboardButton("👤 Set Target Wallet", callback_data="prompt_set_target_wallet"),
+            InlineKeyboardButton("💸 Set Buy Amount", callback_data="prompt_set_copy_amount"),
+        ],
+        [
+            InlineKeyboardButton(toggle_sells_text, callback_data="toggle_copy_sells"),
+            InlineKeyboardButton("⚡ Slippage", callback_data="prompt_copy_slippage"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
+        ]
+    ])
+    return text, markup
+
+
+def format_ai_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds AI Autopilot Dashboard"""
+    settings = SettingsManager.get_user_settings(user_id)
+    mode = settings.get("mode", "MANUAL")
+    is_active = (mode == "AI")
+    strategy = settings.get("ai_strategy", "BALANCED")
+    trade_amt = settings.get("ai_trade_amount_sol", 0.1)
+    tp_pct = settings.get("ai_take_profit_pct", 30.0)
+    sl_pct = settings.get("ai_stop_loss_pct", 15.0)
+
+    ai_status = AITradingEngine.get_status()
+    status_str = "🟢 <b>ACTIVE (AI Autopilot Engaged)</b>" if is_active else "⏸️ <b>PAUSED</b>"
+
+    text = (
+        "🤖 <b>AI AUTONOMOUS TRADING DASHBOARD</b>\n"
+        "<i>Autonomous market analysis, sniper execution & risk exit management</i>\n\n"
+        f"📊 <b>Engine Status:</b> {status_str}\n"
+        f"🧠 <b>AI Core:</b> <code>{ai_status['description']}</code>\n"
+        f"🎯 <b>Strategy:</b> <b>{strategy}</b>\n"
+        f"💸 <b>Max Trade Size:</b> <code>{trade_amt:.2f} SOL</code>\n"
+        f"📈 <b>Take Profit:</b> <code>+{tp_pct:.0f}%</code> | <b>Stop Loss:</b> <code>-{sl_pct:.0f}%</code>\n\n"
+        "🤖 <b>Strategy Profiles:</b>\n"
+        "• <b>Balanced:</b> High-momentum breakouts with verified liquidity & revoked authorities.\n"
+        "• <b>Degen:</b> Aggressive pump.fun curve volume scalping.\n"
+        "• <b>Conservative:</b> Ultra-safe $50K+ liquidity with zero warnings.\n\n"
+        "💡 <i>You can add your OpenAI, Grok, or Claude API key in <code>.env</code> anytime for custom LLM decision making.</i>"
+    )
+
+    toggle_btn_text = "⏸️ Pause AI Mode" if is_active else "▶️ Activate AI Mode"
+
+    strat_buttons = [
+        InlineKeyboardButton(("✅ " if strategy == "BALANCED" else "") + "Balanced", callback_data="set_ai_strat:BALANCED"),
+        InlineKeyboardButton(("✅ " if strategy == "DEGEN" else "") + "Degen", callback_data="set_ai_strat:DEGEN"),
+        InlineKeyboardButton(("✅ " if strategy == "CONSERVATIVE" else "") + "Conservative", callback_data="set_ai_strat:CONSERVATIVE"),
+    ]
+
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(toggle_btn_text, callback_data="toggle_ai_mode"),
+        ],
+        strat_buttons,
+        [
+            InlineKeyboardButton("💸 Set Trade Size", callback_data="prompt_set_ai_amount"),
+            InlineKeyboardButton("📈 Set TP / SL", callback_data="prompt_set_ai_tpsl"),
         ],
         [
             InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
@@ -187,6 +307,7 @@ def build_audit_markup(
         ],
         [
             InlineKeyboardButton("✏️ Custom Buy", callback_data=f"custom_buy:{mint}"),
+            InlineKeyboardButton("🤖 AI Scan", callback_data=f"ai_scan:{mint}"),
             InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{mint}"),
         ],
     ]
@@ -279,6 +400,40 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Action cancelled.\n\n" + text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
+async def copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /copy command"""
+    user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
+    text, markup = format_copy_menu(user_id)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /ai command"""
+    user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
+    text, markup = format_ai_menu(user_id)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def import_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /import command"""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("⚠️ For your security, wallet import can only be done in a direct private 1-on-1 chat with the bot.")
+        return
+    user_id = update.effective_user.id
+    USER_STATES[user_id] = {"type": "import_wallet"}
+    prompt_text = (
+        "📥 <b>IMPORT EXISTING WALLET</b>\n\n"
+        "Reply with your Phantom or Solflare <b>Base58 Private Key</b> (or JSON byte array):\n\n"
+        "🔒 <b>Security Notice:</b>\n"
+        "• Your key is encrypted with AES-256 Fernet immediately upon receipt.\n"
+        "• The bot will automatically attempt to delete your message from Telegram.\n"
+        "• Type /cancel anytime to abort."
+    )
+    await update.message.reply_text(prompt_text, parse_mode=ParseMode.HTML)
+
+
 async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays user wallet details, balance, export PK, and withdraw options"""
     if update.effective_chat.type != "private":
@@ -299,7 +454,8 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💵 <b>USDT Balance:</b> <code>{usdt_bal:.2f} USDT</code>\n\n"
         "📥 <b>Deposit:</b> Send SOL or USDT directly to the address above.\n"
         "📤 <b>Withdraw:</b> Tap <b>Withdraw SOL</b> to send funds to any wallet.\n"
-        "🔑 <b>Phantom / Solflare:</b> Tap <b>Export Private Key</b> to import this wallet."
+        "🔑 <b>Import:</b> Tap <b>Import Wallet</b> to connect an existing Phantom key.\n"
+        "🔐 <b>Export:</b> Tap <b>Export Private Key</b> to backup your wallet."
     )
 
     markup = InlineKeyboardMarkup([
@@ -308,10 +464,13 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("💸 Withdraw SOL", callback_data="withdraw_prompt"),
         ],
         [
-            InlineKeyboardButton("🔑 Export Private Key (Phantom)", callback_data="export_pk_confirm"),
+            InlineKeyboardButton("📥 Import Wallet (Phantom / Solflare)", callback_data="import_wallet_prompt"),
         ],
         [
+            InlineKeyboardButton("🔑 Export Private Key", callback_data="export_pk_confirm"),
             InlineKeyboardButton("🔄 Generate New Wallet", callback_data="reset_wallet_prompt"),
+        ],
+        [
             InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
         ]
     ])
@@ -532,6 +691,109 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await execute_usdt_to_sol_action(update, context, user_id, amt)
             return
 
+        # Import Existing Wallet
+        elif state_type == "import_wallet":
+            del USER_STATES[user_id]
+            try:
+                # Security: Delete raw private key message from chat immediately
+                await update.message.delete()
+            except Exception:
+                pass
+
+            success, pubkey_imported, msg = WalletManager.import_wallet(user_id, text)
+            if success:
+                sol_bal = WalletManager.get_sol_balance(pubkey_imported)
+                usdt_bal = WalletManager.get_usdt_balance(pubkey_imported)
+                succ_text = (
+                    "🎉 <b>WALLET IMPORTED SUCCESSFULLY!</b>\n\n"
+                    "📬 <b>Connected Address:</b>\n"
+                    f"<code>{pubkey_imported}</code> <i>(tap to copy)</i>\n\n"
+                    f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n\n"
+                    "🔒 <i>Your private key is secured with AES-256 encryption. Your Telegram message containing the key was deleted automatically.</i>"
+                )
+                _, markup = format_main_menu(user_id)
+                await update.effective_chat.send_message(succ_text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            else:
+                await update.effective_chat.send_message(f"❌ <b>Import Failed:</b> {html.escape(msg)}\n\nTry again via /import or type /cancel to abort.", parse_mode=ParseMode.HTML)
+            return
+
+        # Set Target Wallet for Copy Trading
+        elif state_type == "set_target_wallet":
+            del USER_STATES[user_id]
+            target_addr = MarketSniffer.extract_solana_address(text) or text.strip()
+            if not MarketSniffer.is_valid_solana_address(target_addr):
+                await update.message.reply_text("❌ Invalid Solana wallet address. Please provide a valid Base58 address.")
+                return
+
+            SettingsManager.update_user_settings(user_id, {"target_wallet": target_addr, "last_seen_sig": ""})
+            await update.message.reply_text(f"✅ <b>Target Wallet Set!</b>\n<code>{target_addr}</code>\n\nReturning to Copy Trading menu...", parse_mode=ParseMode.HTML)
+            text_out, markup_out = format_copy_menu(user_id)
+            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+            return
+
+        # Set Copy Buy Amount
+        elif state_type == "set_copy_amount":
+            del USER_STATES[user_id]
+            amt = parse_positive_float(text, max_val=100.0)
+            if amt is None:
+                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. <code>0.2</code>).")
+                return
+
+            SettingsManager.update_user_settings(user_id, {"copy_buy_amount_sol": amt})
+            await update.message.reply_text(f"✅ <b>Copy Buy Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
+            text_out, markup_out = format_copy_menu(user_id)
+            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+            return
+
+        # Set Copy Slippage
+        elif state_type == "set_copy_slippage":
+            del USER_STATES[user_id]
+            pct = parse_positive_float(text, max_val=50.0)
+            if pct is None:
+                await update.message.reply_text("❌ Please enter a valid slippage percentage (e.g. <code>3.5</code>).")
+                return
+
+            bps = int(pct * 100)
+            SettingsManager.update_user_settings(user_id, {"slippage_bps": bps})
+            await update.message.reply_text(f"✅ <b>Slippage set to {pct:.1f}% ({bps} BPS)!</b>", parse_mode=ParseMode.HTML)
+            text_out, markup_out = format_copy_menu(user_id)
+            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+            return
+
+        # Set AI Trade Amount
+        elif state_type == "set_ai_amount":
+            del USER_STATES[user_id]
+            amt = parse_positive_float(text, max_val=100.0)
+            if amt is None:
+                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. <code>0.1</code>).")
+                return
+
+            SettingsManager.update_user_settings(user_id, {"ai_trade_amount_sol": amt})
+            await update.message.reply_text(f"✅ <b>AI Trade Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
+            text_out, markup_out = format_ai_menu(user_id)
+            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+            return
+
+        # Set AI TP / SL
+        elif state_type == "set_ai_tpsl":
+            del USER_STATES[user_id]
+            parts = text.split()
+            if len(parts) < 2:
+                await update.message.reply_text("Usage: <code>&lt;take_profit_pct&gt; &lt;stop_loss_pct&gt;</code> (e.g. <code>40 15</code>)", parse_mode=ParseMode.HTML)
+                return
+
+            tp = parse_positive_float(parts[0], max_val=1000.0)
+            sl = parse_positive_float(parts[1], max_val=99.0)
+            if tp is None or sl is None:
+                await update.message.reply_text("❌ Invalid TP or SL percentages.")
+                return
+
+            SettingsManager.update_user_settings(user_id, {"ai_take_profit_pct": tp, "ai_stop_loss_pct": sl})
+            await update.message.reply_text(f"✅ <b>AI Take Profit set to +{tp:.0f}%, Stop Loss set to -{sl:.0f}%!</b>", parse_mode=ParseMode.HTML)
+            text_out, markup_out = format_ai_menu(user_id)
+            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+            return
+
     # 4. Check if text contains a valid Solana CA (direct CA, "CA: ...", DexScreener/Pump URLs)
     if extracted_ca:
         mint = extracted_ca
@@ -605,6 +867,16 @@ async def execute_buy_action(
     success, sig_or_err, quote = JupiterSwapEngine.execute_buy(keypair, mint, amount_sol)
 
     if success:
+        try:
+            m_data = MarketSniffer.get_market_data(mint)
+            if m_data and m_data.get("price_usd"):
+                u_settings = SettingsManager.get_user_settings(user_id)
+                e_prices = u_settings.get("entry_prices", {})
+                e_prices[mint] = m_data["price_usd"]
+                SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
+        except Exception:
+            pass
+
         success_msg = (
             "🎉 <b>BUY SUCCESSFUL!</b>\n\n"
             f"💸 <b>Spent:</b> <code>{amount_sol} SOL</code>\n"
@@ -769,6 +1041,98 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "positions_menu":
         text, markup = format_positions_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+        return
+
+    # 3. Copy Trading Callbacks
+    if data == "copy_menu":
+        text, markup = format_copy_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data == "toggle_copy_mode":
+        s = SettingsManager.get_user_settings(user_id)
+        new_mode = "MANUAL" if s.get("mode") == "COPY" else "COPY"
+        if new_mode == "COPY" and not s.get("target_wallet"):
+            await query.answer("Please set a Target Wallet first!", show_alert=True)
+            USER_STATES[user_id] = {"type": "set_target_wallet"}
+            await query.message.reply_text("👤 <b>Set Target Wallet:</b>\nReply with the Solana wallet address you want to copy trade:", parse_mode=ParseMode.HTML)
+            return
+        SettingsManager.update_user_settings(user_id, {"mode": new_mode})
+        await query.answer(f"Copy Trading {'Activated!' if new_mode == 'COPY' else 'Paused.'}", show_alert=True)
+        text, markup = format_copy_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data == "toggle_copy_sells":
+        s = SettingsManager.get_user_settings(user_id)
+        new_val = not s.get("copy_sells", True)
+        SettingsManager.update_user_settings(user_id, {"copy_sells": new_val})
+        text, markup = format_copy_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data == "prompt_set_target_wallet":
+        USER_STATES[user_id] = {"type": "set_target_wallet"}
+        await query.message.reply_text("👤 <b>Set Target Wallet:</b>\nReply with the Solana wallet address you wish to copy trade:", parse_mode=ParseMode.HTML)
+        return
+
+    if data == "prompt_set_copy_amount":
+        USER_STATES[user_id] = {"type": "set_copy_amount"}
+        await query.message.reply_text("💸 <b>Set Copy Buy Size:</b>\nReply with the SOL amount to spend per trade (e.g. <code>0.2</code>):", parse_mode=ParseMode.HTML)
+        return
+
+    if data == "prompt_copy_slippage":
+        USER_STATES[user_id] = {"type": "set_copy_slippage"}
+        await query.message.reply_text("⚡ <b>Set Slippage:</b>\nReply with your slippage tolerance percentage (e.g. <code>3.0</code>):", parse_mode=ParseMode.HTML)
+        return
+
+    # 4. AI Trading Callbacks
+    if data == "ai_menu":
+        text, markup = format_ai_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data == "toggle_ai_mode":
+        s = SettingsManager.get_user_settings(user_id)
+        new_mode = "MANUAL" if s.get("mode") == "AI" else "AI"
+        SettingsManager.update_user_settings(user_id, {"mode": new_mode})
+        await query.answer(f"AI Autopilot {'Engaged!' if new_mode == 'AI' else 'Paused.'}", show_alert=True)
+        text, markup = format_ai_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data.startswith("set_ai_strat:"):
+        strat = data.split(":", 1)[1]
+        SettingsManager.update_user_settings(user_id, {"ai_strategy": strat})
+        text, markup = format_ai_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data == "prompt_set_ai_amount":
+        USER_STATES[user_id] = {"type": "set_ai_amount"}
+        await query.message.reply_text("💸 <b>Set AI Trade Size:</b>\nReply with max SOL per AI trade (e.g. <code>0.15</code>):", parse_mode=ParseMode.HTML)
+        return
+
+    if data == "prompt_set_ai_tpsl":
+        USER_STATES[user_id] = {"type": "set_ai_tpsl"}
+        await query.message.reply_text("📈 <b>Set Take Profit & Stop Loss:</b>\nReply with: <code>&lt;TP%&gt; &lt;SL%&gt;</code> (e.g. <code>40 15</code> for +40% TP, -15% SL):", parse_mode=ParseMode.HTML)
+        return
+
+    # 5. Import Wallet Prompt Callback
+    if data == "import_wallet_prompt":
+        if update.effective_chat.type != "private":
+            await query.answer("⚠️ Security Alert: Wallet import can only be accessed in private chat with the bot.", show_alert=True)
+            return
+        USER_STATES[user_id] = {"type": "import_wallet"}
+        prompt_text = (
+            "📥 <b>IMPORT EXISTING WALLET</b>\n\n"
+            "Reply with your Phantom or Solflare <b>Base58 Private Key</b> (or JSON byte array):\n\n"
+            "🔒 <b>Security Notice:</b>\n"
+            "• Your key is encrypted with AES-256 Fernet immediately upon receipt.\n"
+            "• The bot will automatically delete your message from Telegram.\n"
+            "• Type /cancel anytime to abort."
+        )
+        await query.message.reply_text(prompt_text, parse_mode=ParseMode.HTML)
         return
 
     # 3. Swap SOL -> USDT sub-menu
@@ -948,6 +1312,26 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
         return
 
+    # 8.5 AI Scan Callback
+    if data.startswith("ai_scan:"):
+        mint = data.split(":", 1)[1]
+        settings = SettingsManager.get_user_settings(user_id)
+        strategy = settings.get("ai_strategy", "BALANCED")
+        eval_res = AITradingEngine.evaluate_token(mint, strategy=strategy)
+        decision = eval_res.get("decision", "SKIP")
+        confidence = eval_res.get("confidence", 0.0) * 100
+        reason = eval_res.get("reason", "N/A")
+        badge = "🟢 BUY RECOMMENDED" if decision == "BUY" else "🔴 PASS / CAUTION"
+        ai_text = (
+            f"🤖 <b>AI TOKEN ANALYSIS ({strategy})</b>\n\n"
+            f"🪙 <b>Token:</b> <code>{mint}</code>\n"
+            f"🎯 <b>Recommendation:</b> <b>{badge}</b>\n"
+            f"📊 <b>Confidence:</b> <code>{confidence:.0f}%</code>\n"
+            f"💬 <b>Reasoning:</b> <i>{html.escape(reason)}</i>"
+        )
+        await query.message.reply_text(ai_text, parse_mode=ParseMode.HTML)
+        return
+
     # 9. Custom Buy
     if data.startswith("custom_buy:"):
         mint = data.split(":", 1)[1]
@@ -977,6 +1361,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         success, sig_or_err, quote = JupiterSwapEngine.execute_sell(keypair, mint, percentage=pct)
 
         if success:
+            if pct >= 100:
+                try:
+                    u_settings = SettingsManager.get_user_settings(user_id)
+                    e_prices = u_settings.get("entry_prices", {})
+                    if mint in e_prices:
+                        del e_prices[mint]
+                        SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
+                except Exception:
+                    pass
+
             out_sol = int(quote.get("outAmount", 0)) / 1_000_000_000.0 if quote else 0.0
             await status_msg.edit_text(
                 "🎉 <b>SELL SUCCESSFUL!</b>\n\n"
@@ -1026,6 +1420,139 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
 
+async def background_trader_worker(application: Application):
+    """
+    Continuous background loop that monitors:
+    1. Active copy-trading target wallets on-chain (sub-3s polling)
+    2. Active AI positions for Take Profit / Stop Loss thresholds
+    """
+    logger.info("🚀 Background Copy Trading & AI Autopilot worker loop started.")
+    initialized_targets = set()
+
+    while True:
+        try:
+            # --- 1. COPY TRADING MONITOR ---
+            active_copy = SettingsManager.get_active_copy_traders()
+            for user_id, settings in active_copy:
+                target = settings.get("target_wallet", "").strip()
+                if not target:
+                    continue
+
+                last_sig = settings.get("last_seen_sig", "")
+
+                # If target was never initialized, record current head signature without trading
+                if target not in initialized_targets and not last_sig:
+                    try:
+                        recent = CopyTradingEngine.get_recent_swaps(target)
+                        if recent:
+                            latest_sig = recent[-1][0]
+                            SettingsManager.update_user_settings(user_id, {"last_seen_sig": latest_sig})
+                        initialized_targets.add(target)
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize copy target {target}: {e}")
+                    continue
+
+                initialized_targets.add(target)
+
+                # Fetch any new swaps since last_seen_sig
+                try:
+                    new_swaps = CopyTradingEngine.get_recent_swaps(target, last_seen_sig=last_sig)
+                except Exception as e:
+                    logger.warning(f"Error querying swaps for target {target}: {e}")
+                    new_swaps = []
+
+                if new_swaps:
+                    for sig, swap_info in new_swaps:
+                        SettingsManager.update_user_settings(user_id, {"last_seen_sig": sig})
+
+                        trade_res = CopyTradingEngine.execute_mirrored_trade(user_id, swap_info, settings)
+                        if trade_res:
+                            action = trade_res.get("action", "SWAP")
+                            mint = trade_res.get("mint", "")
+
+                            if trade_res.get("success"):
+                                tx_sig = trade_res.get("sig", "")
+                                amt_info = f"<code>{trade_res.get('amount_sol', '')} SOL</code>" if action == "BUY" else "100%"
+                                alert_msg = (
+                                    "🎯 <b>COPY TRADE EXECUTED!</b>\n\n"
+                                    f"👤 <b>Target Wallet:</b> <code>{target[:6]}...{target[-4:]}</code>\n"
+                                    f"⚡ <b>Action:</b> <b>{action}</b> {amt_info}\n"
+                                    f"🪙 <b>Token:</b> <code>{mint}</code>\n"
+                                    f"🔗 <a href='https://solscan.io/tx/{tx_sig}'>View on Solscan</a>"
+                                )
+                                try:
+                                    await application.bot.send_message(
+                                        chat_id=user_id,
+                                        text=alert_msg,
+                                        parse_mode=ParseMode.HTML,
+                                        disable_web_page_preview=True
+                                    )
+                                except Exception as err:
+                                    logger.error(f"Failed to send copy alert to {user_id}: {err}")
+                            else:
+                                err = trade_res.get("error", "Unknown error")
+                                alert_msg = (
+                                    "⚠️ <b>Copy Trade Skipped / Failed:</b>\n\n"
+                                    f"👤 <b>Target:</b> <code>{target[:6]}...{target[-4:]}</code>\n"
+                                    f"⚡ <b>Attempted:</b> {action} <code>{mint}</code>\n"
+                                    f"❌ <b>Reason:</b> <i>{html.escape(str(err))}</i>"
+                                )
+                                try:
+                                    await application.bot.send_message(
+                                        chat_id=user_id,
+                                        text=alert_msg,
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                except Exception:
+                                    pass
+
+            # --- 2. AI POSITION EXIT MONITOR (TP / SL) ---
+            active_ai = SettingsManager.get_active_ai_traders()
+            for user_id, settings in active_ai:
+                entry_prices = settings.get("entry_prices", {})
+                if not entry_prices:
+                    continue
+
+                tp = settings.get("ai_take_profit_pct", 30.0)
+                sl = settings.get("ai_stop_loss_pct", 15.0)
+
+                exits = AITradingEngine.check_position_exits(
+                    user_id=user_id,
+                    entry_prices=entry_prices,
+                    take_profit_pct=tp,
+                    stop_loss_pct=sl
+                )
+
+                for ex in exits:
+                    mint = ex.get("mint", "")
+                    symbol = ex.get("symbol", "TOKEN")
+                    if ex.get("success"):
+                        entry_prices.pop(mint, None)
+                        SettingsManager.update_user_settings(user_id, {"entry_prices": entry_prices})
+                        action_title = "🎉 <b>TAKE PROFIT HIT!</b>" if ex["action"] == "TAKE_PROFIT" else "🛑 <b>STOP LOSS TRIGGERED!</b>"
+                        pct_val = ex.get("gain_pct", ex.get("loss_pct", 0.0))
+                        exit_msg = (
+                            f"{action_title}\n\n"
+                            f"🪙 <b>Token:</b> ${html.escape(symbol)} (<code>{mint}</code>)\n"
+                            f"📊 <b>P&L:</b> <code>{'+' if ex['action'] == 'TAKE_PROFIT' else '-'}{pct_val:.1f}%</code>\n"
+                            f"🔗 <a href='https://solscan.io/tx/{ex.get('sig')}'>View on Solscan</a>"
+                        )
+                        try:
+                            await application.bot.send_message(
+                                chat_id=user_id,
+                                text=exit_msg,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True
+                            )
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            logger.error(f"Error in background trader worker: {e}", exc_info=True)
+
+        await asyncio.sleep(2.5)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Global error handler"""
     logger.error("Exception handling update:", exc_info=context.error)
@@ -1035,6 +1562,7 @@ async def post_init(application: Application):
     """Executed once bot authenticates with Telegram"""
     me = application.bot
     print(f"✅ Market Sniffer Bot is live! Logged in as: {me.first_name} (@{me.username})")
+    asyncio.create_task(background_trader_worker(application))
 
 
 def main():
@@ -1067,6 +1595,9 @@ def main():
     app.add_handler(CommandHandler("wallet", wallet_command))
     app.add_handler(CommandHandler("swap", swap_command))
     app.add_handler(CommandHandler("positions", positions_command))
+    app.add_handler(CommandHandler("copy", copy_command))
+    app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(CommandHandler("import", import_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("alpha", alpha_command))
 

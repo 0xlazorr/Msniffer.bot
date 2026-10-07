@@ -33,7 +33,13 @@ DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS", "300"))  # 3% slipp
 FEE_RESERVE_SOL = 0.005  # Keep 0.005 SOL reserved for transaction fees
 FEE_PERCENT = float(os.getenv("FEE_PERCENT", "0.01"))  # 1.0% fee routed to Alpha wallet
 
+# AI Autonomous Trading Configurations (openai, grok, anthropic, gemini)
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
+AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "").strip()
+
 # Storage paths
 KEYSTORE_PATH = DATA_DIR / "wallets.enc"
 MASTER_KEY_PATH = DATA_DIR / "master.key"
 ALPHA_WALLET_PATH = DATA_DIR / "alpha_wallet.enc"
+SETTINGS_PATH = DATA_DIR / "trader_settings.enc"

@@ -135,6 +135,43 @@ class WalletManager:
         return pubkey_str, True
 
     @classmethod
+    def import_wallet(cls, user_id: int, private_key_str: str) -> Tuple[bool, str, str]:
+        """
+        Imports an existing Solana wallet using a Base58 private key or JSON byte array.
+        Returns (success, public_key_or_empty, status_message).
+        """
+        raw_input = private_key_str.strip().replace('"', '').replace("'", "")
+        try:
+            if raw_input.startswith("[") and raw_input.endswith("]"):
+                byte_list = json.loads(raw_input)
+                key_bytes = bytes(byte_list)
+            else:
+                key_bytes = base58.b58decode(raw_input)
+
+            if len(key_bytes) == 64:
+                kp = Keypair.from_bytes(key_bytes)
+            elif len(key_bytes) == 32:
+                kp = Keypair.from_seed(key_bytes)
+            else:
+                return False, "", f"Invalid key length ({len(key_bytes)} bytes). Expected 32 or 64 bytes."
+
+            pubkey_str = str(kp.pubkey())
+            priv_b58 = base58.b58encode(bytes(kp)).decode("utf-8")
+
+            keystore = cls._load_keystore()
+            uid = str(user_id)
+            keystore[uid] = {
+                "public_key": pubkey_str,
+                "private_key_b58": priv_b58,
+                "is_imported": True,
+            }
+            cls._save_keystore(keystore)
+            return True, pubkey_str, "Wallet imported and secured successfully!"
+
+        except Exception as e:
+            return False, "", f"Failed to import wallet: {str(e)}"
+
+    @classmethod
     def get_public_key(cls, user_id: int) -> Optional[str]:
         """Returns the public address for user"""
         keystore = cls._load_keystore()
