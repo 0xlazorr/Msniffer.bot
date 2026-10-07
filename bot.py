@@ -192,25 +192,23 @@ def format_ai_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     tp_pct = settings.get("ai_take_profit_pct", 30.0)
     sl_pct = settings.get("ai_stop_loss_pct", 15.0)
 
-    ai_status = AITradingEngine.get_status()
-    status_str = "🟢 <b>ACTIVE (AI Autopilot Engaged)</b>" if is_active else "⏸️ <b>PAUSED</b>"
+    status_str = "🟢 <b>ACTIVE (Autopilot Engaged)</b>" if is_active else "⏸️ <b>PAUSED</b>"
 
     text = (
-        "🤖 <b>AI AUTONOMOUS TRADING DASHBOARD</b>\n"
-        "<i>Autonomous market analysis, sniper execution & risk exit management</i>\n\n"
+        "🤖 <b>AUTOPILOT TRADING DASHBOARD</b>\n"
+        "<i>Algorithmic market scanning, momentum breakout execution & auto risk management</i>\n\n"
         f"📊 <b>Engine Status:</b> {status_str}\n"
-        f"🧠 <b>AI Core:</b> <code>{ai_status['description']}</code>\n"
-        f"🎯 <b>Strategy:</b> <b>{strategy}</b>\n"
+        f"🎯 <b>Active Strategy:</b> <b>{strategy}</b>\n"
         f"💸 <b>Max Trade Size:</b> <code>{trade_amt:.2f} SOL</code>\n"
         f"📈 <b>Take Profit:</b> <code>+{tp_pct:.0f}%</code> | <b>Stop Loss:</b> <code>-{sl_pct:.0f}%</code>\n\n"
-        "🤖 <b>Strategy Profiles:</b>\n"
-        "• <b>Balanced:</b> High-momentum breakouts with verified liquidity & revoked authorities.\n"
-        "• <b>Degen:</b> Aggressive pump.fun curve volume scalping.\n"
-        "• <b>Conservative:</b> Ultra-safe $50K+ liquidity with zero warnings.\n\n"
-        "💡 <i>You can add your OpenAI, Grok, or Claude API key in <code>.env</code> anytime for custom LLM decision making.</i>"
+        "📊 <b>Strategy Profiles:</b>\n"
+        "• <b>Balanced:</b> High-momentum breakouts with verified liquidity ($15K+) & revoked authorities.\n"
+        "• <b>Degen:</b> Aggressive pump.fun curve volume scalping ($4K+ liquidity).\n"
+        "• <b>Conservative:</b> Ultra-safe institutional filtering ($50K+ liquidity, zero warnings).\n\n"
+        "💡 <i>When active, the autopilot automatically identifies high-probability breakout patterns and secures profit on target.</i>"
     )
 
-    toggle_btn_text = "⏸️ Pause AI Mode" if is_active else "▶️ Activate AI Mode"
+    toggle_btn_text = "⏸️ Pause Autopilot" if is_active else "▶️ Activate Autopilot"
 
     strat_buttons = [
         InlineKeyboardButton(("✅ " if strategy == "BALANCED" else "") + "Balanced", callback_data="set_ai_strat:BALANCED"),
@@ -1323,7 +1321,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         reason = eval_res.get("reason", "N/A")
         badge = "🟢 BUY RECOMMENDED" if decision == "BUY" else "🔴 PASS / CAUTION"
         ai_text = (
-            f"🤖 <b>AI TOKEN ANALYSIS ({strategy})</b>\n\n"
+            f"⚡ <b>TOKEN PATTERN & SAFETY ANALYSIS ({strategy})</b>\n\n"
             f"🪙 <b>Token:</b> <code>{mint}</code>\n"
             f"🎯 <b>Recommendation:</b> <b>{badge}</b>\n"
             f"📊 <b>Confidence:</b> <code>{confidence:.0f}%</code>\n"
