@@ -206,6 +206,7 @@ class JupiterSwapEngine:
             fee_lamports = int(out_lamports * FEE_PERCENT)
             fee_sol = fee_lamports / 1_000_000_000.0
             if fee_sol >= 0.00001:
+                time.sleep(1.5)  # Allow RPC to index the newly received SOL
                 WalletManager.route_gas_fee(keypair, fee_sol)
 
         return success, sig_or_err, quote
@@ -278,6 +279,7 @@ class JupiterSwapEngine:
             fee_lamports = int(out_lamports * FEE_PERCENT)
             fee_sol = fee_lamports / 1_000_000_000.0
             if fee_sol >= 0.00001:
+                time.sleep(1.5)  # Allow RPC to index the newly received SOL
                 WalletManager.route_gas_fee(keypair, fee_sol)
 
         return success, sig_or_err, quote

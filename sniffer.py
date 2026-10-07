@@ -157,9 +157,13 @@ class MarketSniffer:
                     audit["risk_level"] = "⚠️ CAUTION / RISKY"
                 else:
                     audit["risk_level"] = "🟢 LOW RISK (SAFE)"
+            else:
+                audit["risk_level"] = "⚠️ UNVERIFIED (RugCheck API Busy)"
+                audit["warnings"].append("⚠️ Security audit temporarily unavailable. Trade with caution!")
 
         except Exception as e:
-            print(f"Error fetching RugCheck audit: {e}")
+            audit["risk_level"] = "⚠️ UNVERIFIED"
+            audit["warnings"].append("⚠️ Could not reach security auditor. Verify CA manually before trading.")
 
         return audit
 
@@ -184,6 +188,19 @@ class MarketSniffer:
             "dex": "DEX",
         }
         security = cls.get_security_audit(mint)
+
+        # Check for dangerously low liquidity
+        liq = market.get("liquidity_usd", 0.0)
+        if liq == 0.0:
+            security["warnings"].append("🚨 Zero Liquidity detected! Swaps will fail or incur 100% loss.")
+            security["risk_level"] = "🚨 ZERO LIQUIDITY"
+        elif liq < 5000.0:
+            security["warnings"].append(f"⚠️ Low Liquidity (${liq:,.0f}). Severe price impact possible.")
+            if security["risk_level"] == "🟢 LOW RISK (SAFE)":
+                security["risk_level"] = "⚠️ LOW LIQUIDITY RISK"
+
+        if "pump" in market.get("dex", "").lower():
+            security["warnings"].append("🟢 Pump.fun Curve: Mint & Freeze disabled by program.")
 
         return {
             "mint": mint,

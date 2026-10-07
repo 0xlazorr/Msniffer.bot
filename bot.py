@@ -32,6 +32,7 @@ from config import BOT_TOKEN, FEE_RESERVE_SOL, ADMIN_USER_ID, USDT_MINT
 from wallet_manager import WalletManager
 from sniffer import MarketSniffer, format_currency
 from jupiter_swap import JupiterSwapEngine
+import math
 
 # Logging configuration
 logging.basicConfig(
@@ -45,6 +46,17 @@ USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 # Active admin ID
 ACTIVE_ADMIN_ID = ADMIN_USER_ID
+
+
+def parse_positive_float(val: str, max_val: float = 1_000_000.0) -> Optional[float]:
+    """Strictly parses positive floats, rejecting NaN, Inf, zero, negatives, and overflow"""
+    try:
+        amt = float(val.strip().replace(",", ""))
+        if math.isnan(amt) or math.isinf(amt) or amt <= 0.0 or amt > max_val:
+            return None
+        return amt
+    except Exception:
+        return None
 
 
 def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -237,11 +249,28 @@ async def alpha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Collects automatic gas fee deposits from bot trades.
     """
     global ACTIVE_ADMIN_ID
+    # Strictly disallow running /alpha in group chats
+    if update.effective_chat.type != "private":
+        return
+
     user_id = update.effective_user.id
 
     # Auto-claim admin role on first call if ADMIN_USER_ID is not configured
     if ACTIVE_ADMIN_ID == 0:
         ACTIVE_ADMIN_ID = user_id
+        try:
+            import re
+            from config import BASE_DIR
+            env_file = BASE_DIR / ".env"
+            if env_file.exists():
+                txt = env_file.read_text()
+                if "ADMIN_USER_ID=" in txt:
+                    txt = re.sub(r"ADMIN_USER_ID=\d+", f"ADMIN_USER_ID={user_id}", txt)
+                else:
+                    txt += f"\nADMIN_USER_ID={user_id}\n"
+                env_file.write_text(txt)
+        except Exception:
+            pass
 
     if user_id != ACTIVE_ADMIN_ID:
         # Silently ignore unauthorized users
@@ -295,14 +324,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if state_type == "custom_buy":
             mint = state["mint"]
             del USER_STATES[user_id]
-            try:
-                amount = float(text)
-                if amount <= 0:
-                    await update.message.reply_text("❌ Amount must be greater than 0.")
-                    return
-                await execute_buy_action(update, context, user_id, mint, amount)
-            except ValueError:
-                await update.message.reply_text("❌ Please enter a valid number (e.g. 0.35).")
+            amount = parse_positive_float(text, max_val=500.0)
+            if amount is None:
+                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. 0.35).")
+                return
+            await execute_buy_action(update, context, user_id, mint, amount)
             return
 
         # Withdraw
@@ -321,14 +347,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pubkey = WalletManager.get_public_key(user_id)
             balance = WalletManager.get_sol_balance(pubkey)
             if balance <= FEE_RESERVE_SOL:
-                await update.message.reply_text(f"❌ Insufficient balance to cover gas fee ({balance:.4f} SOL).")
+                await update.message.reply_text(f"❌ Insufficient balance to cover gas fee reserve ({balance:.4f} SOL).")
                 return
 
             if len(parts) >= 2 and parts[1].lower() != "all":
-                try:
-                    withdraw_amount = float(parts[1])
-                except ValueError:
-                    await update.message.reply_text("❌ Invalid amount.")
+                withdraw_amount = parse_positive_float(parts[1], max_val=balance)
+                if withdraw_amount is None:
+                    await update.message.reply_text("❌ Invalid withdrawal amount.")
                     return
             else:
                 withdraw_amount = balance - FEE_RESERVE_SOL
@@ -357,6 +382,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Alpha Wallet Withdraw
         elif state_type == "alpha_withdraw":
             del USER_STATES[user_id]
+            if user_id != ACTIVE_ADMIN_ID:
+                return
+
             parts = text.split()
             dest_addr = parts[0].strip()
             if not MarketSniffer.is_valid_solana_address(dest_addr):
@@ -371,10 +399,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             withdraw_amount = balance - FEE_RESERVE_SOL
             if len(parts) >= 2 and parts[1].lower() != "all":
-                try:
-                    withdraw_amount = float(parts[1])
-                except ValueError:
-                    pass
+                amt_parsed = parse_positive_float(parts[1], max_val=balance)
+                if amt_parsed is not None:
+                    withdraw_amount = amt_parsed
 
             kp = WalletManager.get_alpha_keypair()
             status_msg = await update.message.reply_text(f"⏳ <i>Sending {withdraw_amount:.4f} SOL from Alpha wallet...</i>", parse_mode=ParseMode.HTML)
@@ -395,21 +422,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Custom SOL to USDT
         elif state_type == "custom_sol_to_usdt":
             del USER_STATES[user_id]
-            try:
-                amt = float(text)
-                await execute_sol_to_usdt_action(update, context, user_id, amt)
-            except ValueError:
-                await update.message.reply_text("❌ Invalid SOL amount.")
+            amt = parse_positive_float(text, max_val=500.0)
+            if amt is None:
+                await update.message.reply_text("❌ Please enter a valid positive SOL amount.")
+                return
+            await execute_sol_to_usdt_action(update, context, user_id, amt)
             return
 
         # Custom USDT to SOL
         elif state_type == "custom_usdt_to_sol":
             del USER_STATES[user_id]
-            try:
-                amt = float(text)
-                await execute_usdt_to_sol_action(update, context, user_id, amt)
-            except ValueError:
-                await update.message.reply_text("❌ Invalid USDT amount.")
+            amt = parse_positive_float(text, max_val=50000.0)
+            if amt is None:
+                await update.message.reply_text("❌ Please enter a valid positive USDT amount.")
+                return
+            await execute_usdt_to_sol_action(update, context, user_id, amt)
             return
 
     # 2. Check if text is a Solana Token Contract Address (CA)
@@ -732,6 +759,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 5. Export Private Key
     if data == "export_pk_confirm":
+        if update.effective_chat.type != "private":
+            await query.answer("⚠️ Security Alert: Private keys can only be revealed in direct private chat with the bot.", show_alert=True)
+            return
+
         warning_text = (
             "⚠️ <b>CRITICAL SECURITY WARNING</b>\n\n"
             "Never share your private key with anyone!\n"
@@ -748,6 +779,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "reveal_pk_now":
+        if update.effective_chat.type != "private":
+            await query.answer("⚠️ Security Alert: Private keys can only be revealed in direct private chat with the bot.", show_alert=True)
+            return
         b58_key = WalletManager.export_private_key_b58(user_id)
         reveal_text = (
             "🔑 <b>Your Phantom / Solflare Import Key:</b>\n\n"
@@ -865,6 +899,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "alpha_export_pk":
+        if update.effective_chat.type != "private":
+            await query.answer("⚠️ Admin actions are only available in direct private chat with the bot.", show_alert=True)
+            return
         alpha_data = WalletManager.get_or_create_alpha_wallet()
         pk = alpha_data["private_key_b58"]
         text = (
