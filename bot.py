@@ -114,6 +114,62 @@ def format_swap_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return text, markup
 
 
+def format_positions_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds portfolio and token positions dashboard"""
+    pubkey = WalletManager.get_public_key(user_id)
+    if not pubkey:
+        pubkey, _ = WalletManager.get_or_create_wallet(user_id)
+
+    sol_bal = WalletManager.get_sol_balance(pubkey)
+    all_positions = WalletManager.get_all_positions(pubkey)
+
+    # Filter out dust (ui_amount < 0.000001)
+    active_positions = [p for p in all_positions if p.get("ui_amount", 0.0) > 0.000001]
+
+    lines = [
+        "🎒 <b>MY PORTFOLIO & POSITIONS</b>\n",
+        f"📬 <b>Wallet:</b> <code>{pubkey}</code>",
+        f"💰 <b>SOL Balance:</b> <code>{sol_bal:.4f} SOL</code>\n",
+    ]
+
+    keyboard = []
+
+    if not active_positions:
+        lines.append("<i>You currently hold no open SPL token positions.</i>")
+        lines.append("\n💡 <i>Paste any Token CA or DexScreener link to sniff and buy!</i>")
+    else:
+        lines.append("📊 <b>Open Token Holdings:</b>")
+        for pos in active_positions[:6]:
+            mint = pos["mint"]
+            ui_amt = pos["ui_amount"]
+
+            market_info = MarketSniffer.get_market_data(mint)
+            symbol = market_info.get("symbol", "TOKEN") if market_info else "TOKEN"
+            price_usd = market_info.get("price_usd", 0.0) if market_info else 0.0
+            val_usd = ui_amt * price_usd
+
+            sym_esc = html.escape(symbol)
+            val_str = f" (~${val_usd:,.2f})" if val_usd > 0 else ""
+            lines.append(
+                f"• <b>${sym_esc}</b>: <code>{ui_amt:,.4f}</code>{val_str}\n  <code>{mint}</code>"
+            )
+
+            keyboard.append([
+                InlineKeyboardButton(f"🔴 Sell 50% ${sym_esc}", callback_data=f"sell:{mint}:50"),
+                InlineKeyboardButton(f"🔴 Sell 100% ${sym_esc}", callback_data=f"sell:{mint}:100"),
+            ])
+            keyboard.append([
+                InlineKeyboardButton(f"🔎 Sniff ${sym_esc}", callback_data=f"refresh:{mint}"),
+            ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh Positions", callback_data="positions_menu"),
+        InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
 def build_audit_markup(
     mint: str,
     pair_url: str,
@@ -194,6 +250,7 @@ def format_audit_message(report: dict, sol_balance: float, token_balance: float 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /start command"""
     user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
     text, markup = format_main_menu(user_id)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
@@ -201,13 +258,35 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /swap command"""
     user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
     text, markup = format_swap_menu(user_id)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
+async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /positions command"""
+    user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
+    text, markup = format_positions_menu(user_id)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /cancel command"""
+    user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
+    text, markup = format_main_menu(user_id)
+    await update.message.reply_text("❌ Action cancelled.\n\n" + text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
 async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays user wallet details, balance, export PK, and withdraw options"""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("⚠️ For your security, wallet details and keys can only be managed in direct private chat with the bot.")
+        return
+
     user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
     pubkey, _ = WalletManager.get_or_create_wallet(user_id)
     sol_bal = WalletManager.get_sol_balance(pubkey)
     usdt_bal = WalletManager.get_usdt_balance(pubkey)
@@ -276,6 +355,7 @@ async def alpha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Silently ignore unauthorized users
         return
 
+    USER_STATES.pop(user_id, None)
     alpha_data = WalletManager.get_or_create_alpha_wallet()
     alpha_pub = alpha_data["public_key"]
     balance = WalletManager.get_sol_balance(alpha_pub)
@@ -311,22 +391,35 @@ async def alpha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MESSAGE & TEXT HANDLER
 # ----------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes incoming text: Solana CAs or pending state inputs"""
+    """Processes incoming text: Solana CAs, cancel commands, or pending state inputs"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # 1. State machine (waiting for user inputs)
+    # 1. Handle explicit cancel
+    if text.lower() in ("/cancel", "cancel", "stop", "exit"):
+        USER_STATES.pop(user_id, None)
+        text_out, markup_out = format_main_menu(user_id)
+        await update.message.reply_text("❌ Action cancelled.\n\n" + text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+        return
+
+    # 2. Extract potential Solana address
+    extracted_ca = MarketSniffer.extract_solana_address(text)
+
+    # 3. State machine (waiting for user inputs)
     if user_id in USER_STATES:
         state = USER_STATES[user_id]
         state_type = state.get("type")
 
-        # Custom Buy
-        if state_type == "custom_buy":
+        # If user was in a numeric prompt but pasted a new CA, discard prompt and sniff CA
+        if extracted_ca and state_type in ("custom_buy", "custom_sol_to_usdt", "custom_usdt_to_sol"):
+            USER_STATES.pop(user_id, None)
+            # Will proceed to sniffing extracted_ca below
+        elif state_type == "custom_buy":
             mint = state["mint"]
             del USER_STATES[user_id]
             amount = parse_positive_float(text, max_val=500.0)
             if amount is None:
-                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. 0.35).")
+                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. 0.35). Type /cancel to abort.")
                 return
             await execute_buy_action(update, context, user_id, mint, amount)
             return
@@ -439,9 +532,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await execute_usdt_to_sol_action(update, context, user_id, amt)
             return
 
-    # 2. Check if text is a Solana Token Contract Address (CA)
-    if MarketSniffer.is_valid_solana_address(text):
-        mint = text
+    # 4. Check if text contains a valid Solana CA (direct CA, "CA: ...", DexScreener/Pump URLs)
+    if extracted_ca:
+        mint = extracted_ca
         status_msg = await update.message.reply_text(
             f"🔎 <i>Sniffing token security and market metrics for:</i>\n<code>{mint}</code>...",
             parse_mode=ParseMode.HTML
@@ -526,8 +619,12 @@ async def execute_buy_action(
                 InlineKeyboardButton("🔴 Sell 100%", callback_data=f"sell:{mint}:100"),
             ],
             [
+                InlineKeyboardButton("🎒 My Positions", callback_data="positions_menu"),
                 InlineKeyboardButton("🔎 Resniff Token", callback_data=f"refresh:{mint}"),
+            ],
+            [
                 InlineKeyboardButton("💳 Wallet", callback_data="wallet_menu"),
+                InlineKeyboardButton("🔙 Home", callback_data="home_menu"),
             ]
         ])
         await status_msg.edit_text(success_msg, parse_mode=ParseMode.HTML, reply_markup=sell_markup, disable_web_page_preview=True)
@@ -667,6 +764,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(f"Balance: {balance:.4f} SOL", show_alert=True)
         text, markup = format_main_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    if data == "positions_menu":
+        text, markup = format_positions_menu(user_id)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
         return
 
     # 3. Swap SOL -> USDT sub-menu
@@ -964,6 +1066,8 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("wallet", wallet_command))
     app.add_handler(CommandHandler("swap", swap_command))
+    app.add_handler(CommandHandler("positions", positions_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("alpha", alpha_command))
 
     # Text message handler

@@ -111,7 +111,7 @@ class JupiterSwapEngine:
 
             if "result" in data:
                 sig = data["result"]
-                return True, sig
+                return WalletManager.confirm_transaction(sig)
             elif "error" in data:
                 err_msg = data["error"].get("message", "Transaction failed")
                 return False, err_msg
@@ -179,7 +179,10 @@ class JupiterSwapEngine:
         if raw_balance <= 0:
             return False, "You do not hold any balance of this token in your bot wallet.", None
 
-        sell_raw = int(raw_balance * (percentage / 100.0))
+        if percentage >= 100.0:
+            sell_raw = raw_balance
+        else:
+            sell_raw = int(raw_balance * (percentage / 100.0))
         if sell_raw <= 0:
             return False, "Calculated sell amount is 0.", None
 

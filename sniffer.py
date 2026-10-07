@@ -1,3 +1,4 @@
+import re
 import requests
 from typing import Optional, Dict, Any, List
 from solders.pubkey import Pubkey
@@ -32,6 +33,30 @@ class MarketSniffer:
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def extract_solana_address(text: str) -> Optional[str]:
+        """
+        Extracts a valid Solana Base58 public key from raw text,
+        handling direct CAs, 'CA: <addr>', DexScreener URLs, Pump.fun URLs, etc.
+        """
+        if not text:
+            return None
+        cleaned = text.strip()
+        try:
+            Pubkey.from_string(cleaned)
+            return cleaned
+        except Exception:
+            pass
+
+        tokens = re.findall(r"[1-9A-HJ-NP-Za-km-z]{32,44}", cleaned)
+        for tok in tokens:
+            try:
+                Pubkey.from_string(tok)
+                return tok
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def get_market_data(mint: str) -> Optional[Dict[str, Any]]:
@@ -146,9 +171,17 @@ class MarketSniffer:
                     if top10_sum > 50.0:
                         audit["warnings"].append(f"⚠️ Top 10 holders own {top10_sum:.1f}% (High dump risk)")
 
-                # 4. RugCheck Risk Score
+                # 4. RugCheck Risk Score & Metadata
                 score = data.get("score", 0)
                 audit["score"] = score
+                audit["token_meta"] = data.get("tokenMeta", {})
+
+                for r in data.get("risks", []):
+                    desc = r.get("description") or r.get("name")
+                    if desc:
+                        warn = f"⚠️ {desc}"
+                        if warn not in audit["warnings"]:
+                            audit["warnings"].append(warn)
 
                 # Determine overall risk rating
                 if audit["freeze_authority"] == "ACTIVE" or audit["mint_authority"] == "ACTIVE":
@@ -189,15 +222,23 @@ class MarketSniffer:
         }
         security = cls.get_security_audit(mint)
 
-        # Check for dangerously low liquidity
+        # Fallback to RugCheck token metadata if DexScreener has no pair info
+        if market["name"] == "Unknown Token" and security.get("token_meta"):
+            meta = security["token_meta"]
+            if meta.get("name"):
+                market["name"] = meta["name"]
+            if meta.get("symbol"):
+                market["symbol"] = meta["symbol"]
+
+        # Liquidity analysis
         liq = market.get("liquidity_usd", 0.0)
-        if liq == 0.0:
-            security["warnings"].append("🚨 Zero Liquidity detected! Swaps will fail or incur 100% loss.")
-            security["risk_level"] = "🚨 ZERO LIQUIDITY"
-        elif liq < 5000.0:
+        if 0.0 < liq < 5000.0:
             security["warnings"].append(f"⚠️ Low Liquidity (${liq:,.0f}). Severe price impact possible.")
             if security["risk_level"] == "🟢 LOW RISK (SAFE)":
                 security["risk_level"] = "⚠️ LOW LIQUIDITY RISK"
+        elif liq == 0.0 and not security.get("token_meta"):
+            security["warnings"].append("🚨 Zero Liquidity detected! Swaps may fail.")
+            security["risk_level"] = "🚨 ZERO LIQUIDITY"
 
         if "pump" in market.get("dex", "").lower():
             security["warnings"].append("🟢 Pump.fun Curve: Mint & Freeze disabled by program.")
