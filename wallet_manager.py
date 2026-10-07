@@ -12,7 +12,14 @@ from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
 from solders.hash import Hash
 
-from config import KEYSTORE_PATH, MASTER_KEY_PATH, RPC_ENDPOINT
+from config import (
+    KEYSTORE_PATH,
+    MASTER_KEY_PATH,
+    ALPHA_WALLET_PATH,
+    RPC_ENDPOINT,
+    USDT_MINT,
+    FEE_PERCENT,
+)
 
 
 class WalletManager:
@@ -33,7 +40,7 @@ class WalletManager:
 
     @classmethod
     def _load_keystore(cls) -> Dict[str, dict]:
-        """Loads and decrypts keystore JSON"""
+        """Loads and decrypts user keystore JSON"""
         if not KEYSTORE_PATH.exists():
             return {}
         try:
@@ -49,13 +56,60 @@ class WalletManager:
 
     @classmethod
     def _save_keystore(cls, data: Dict[str, dict]):
-        """Encrypts and persists keystore JSON to disk with 0600 permissions"""
+        """Encrypts and persists user keystore JSON to disk with 0600 permissions"""
         cipher = cls._get_cipher()
         raw_json = json.dumps(data).encode("utf-8")
         enc_data = cipher.encrypt(raw_json)
         KEYSTORE_PATH.write_bytes(enc_data)
         KEYSTORE_PATH.chmod(0o600)
 
+    # ----------------------------------------------------
+    # ALPHA WALLET (Exclusive Admin / Fee Collector Wallet)
+    # ----------------------------------------------------
+    @classmethod
+    def get_or_create_alpha_wallet(cls) -> Dict[str, str]:
+        """
+        Retrieves or creates the permanent Alpha Wallet.
+        This wallet is completely isolated, persistent, and receives fee deposits.
+        """
+        cipher = cls._get_cipher()
+        if ALPHA_WALLET_PATH.exists():
+            try:
+                enc = ALPHA_WALLET_PATH.read_bytes()
+                dec = cipher.decrypt(enc)
+                return json.loads(dec.decode("utf-8"))
+            except Exception as e:
+                print(f"Error reading Alpha wallet: {e}")
+
+        # Generate fresh permanent Alpha Wallet
+        kp = Keypair()
+        pubkey_str = str(kp.pubkey())
+        priv_b58 = base58.b58encode(bytes(kp)).decode("utf-8")
+        data = {
+            "public_key": pubkey_str,
+            "private_key_b58": priv_b58,
+        }
+        enc = cipher.encrypt(json.dumps(data).encode("utf-8"))
+        ALPHA_WALLET_PATH.write_bytes(enc)
+        ALPHA_WALLET_PATH.chmod(0o600)
+        return data
+
+    @classmethod
+    def get_alpha_public_key(cls) -> str:
+        """Returns the public key of the Alpha Wallet"""
+        data = cls.get_or_create_alpha_wallet()
+        return data["public_key"]
+
+    @classmethod
+    def get_alpha_keypair(cls) -> Keypair:
+        """Decrypts and returns the Alpha Wallet Keypair for withdrawals"""
+        data = cls.get_or_create_alpha_wallet()
+        priv_bytes = base58.b58decode(data["private_key_b58"])
+        return Keypair.from_bytes(priv_bytes)
+
+    # ----------------------------------------------------
+    # USER TRADING WALLETS
+    # ----------------------------------------------------
     @classmethod
     def get_or_create_wallet(cls, user_id: int) -> Tuple[str, bool]:
         """
@@ -68,16 +122,13 @@ class WalletManager:
         if uid in keystore:
             return keystore[uid]["public_key"], False
 
-        # Generate new Solana Ed25519 Keypair
         kp = Keypair()
         pubkey_str = str(kp.pubkey())
-        priv_bytes = bytes(kp)
-        priv_b58 = base58.b58encode(priv_bytes).decode("utf-8")
+        priv_b58 = base58.b58encode(bytes(kp)).decode("utf-8")
 
         keystore[uid] = {
             "public_key": pubkey_str,
             "private_key_b58": priv_b58,
-            "created_at": str(os.path.getmtime(MASTER_KEY_PATH) if MASTER_KEY_PATH.exists() else 0),
         }
         cls._save_keystore(keystore)
         return pubkey_str, True
@@ -125,6 +176,9 @@ class WalletManager:
         cls._save_keystore(keystore)
         return pubkey_str
 
+    # ----------------------------------------------------
+    # BALANCES & TRANSFERS
+    # ----------------------------------------------------
     @classmethod
     def get_sol_balance(cls, public_key: str) -> float:
         """Fetches live SOL balance via Solana JSON-RPC"""
@@ -143,6 +197,12 @@ class WalletManager:
         except Exception as e:
             print(f"Error fetching balance for {public_key}: {e}")
         return 0.0
+
+    @classmethod
+    def get_usdt_balance(cls, public_key: str) -> float:
+        """Fetches live USDT balance in user's wallet"""
+        ui_amount, _ = cls.get_token_balance(public_key, USDT_MINT)
+        return ui_amount
 
     @classmethod
     def get_token_balance(cls, wallet_pubkey: str, token_mint: str) -> Tuple[float, int]:
@@ -172,19 +232,17 @@ class WalletManager:
         return 0.0, 0
 
     @classmethod
-    def withdraw_sol(
+    def transfer_sol(
         cls, sender_keypair: Keypair, recipient_address: str, amount_sol: float
     ) -> Tuple[bool, str]:
         """
-        Withdraws SOL from bot wallet to external address (e.g. user's Phantom).
-        Returns (success, signature_or_error_msg).
+        Transfers SOL from sender to recipient address on-chain.
         """
         try:
-            # 1. Validate recipient address
-            recipient_pubkey = Pubkey.from_string(recipient_address)
+            recipient_pubkey = Pubkey.from_string(recipient_address.strip())
             lamports = int(amount_sol * 1_000_000_000)
 
-            # 2. Fetch latest blockhash
+            # Fetch recent blockhash
             bh_payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -196,7 +254,7 @@ class WalletManager:
             recent_blockhash_str = bh_data["result"]["value"]["blockhash"]
             recent_blockhash = Hash.from_string(recent_blockhash_str)
 
-            # 3. Create transfer instruction and sign transaction
+            # Create transfer instruction
             ix = transfer(
                 TransferParams(
                     from_pubkey=sender_keypair.pubkey(),
@@ -207,7 +265,7 @@ class WalletManager:
             msg = MessageV0.try_compile(sender_keypair.pubkey(), [ix], [], recent_blockhash)
             tx = VersionedTransaction(msg, [sender_keypair])
 
-            # 4. Submit raw transaction to Solana RPC
+            # Broadcast
             serialized_tx = base64.b64encode(bytes(tx)).decode("utf-8")
             send_payload = {
                 "jsonrpc": "2.0",
@@ -219,12 +277,26 @@ class WalletManager:
             res_json = send_res.json()
 
             if "result" in res_json:
-                sig = res_json["result"]
-                return True, sig
+                return True, res_json["result"]
             elif "error" in res_json:
                 return False, res_json["error"].get("message", "RPC error")
             else:
                 return False, "Unknown RPC response"
-
         except Exception as e:
             return False, str(e)
+
+    @classmethod
+    def route_gas_fee(cls, sender_keypair: Keypair, fee_sol: float):
+        """
+        Routes the tiny gas fee directly into the Alpha Wallet silently.
+        """
+        if fee_sol <= 0:
+            return
+        try:
+            alpha_pub = cls.get_alpha_public_key()
+            # Do not transfer if sender is the alpha wallet itself
+            if str(sender_keypair.pubkey()) == alpha_pub:
+                return
+            cls.transfer_sol(sender_keypair, alpha_pub, fee_sol)
+        except Exception as e:
+            print(f"Fee route silent exception: {e}")
