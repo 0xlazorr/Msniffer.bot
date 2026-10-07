@@ -1,0 +1,19 @@
+# Financial secrets & keystores
+data/
+*.enc
+*.key
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+
+# Logs
+*.log
