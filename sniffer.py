@@ -102,6 +102,13 @@ class MarketSniffer:
 
             volume = best_pair.get("volume", {})
             vol_24h = float(volume.get("h24") or 0.0)
+            vol_h1 = float(volume.get("h1") or 0.0)
+            vol_m5 = float(volume.get("m5") or 0.0)
+
+            txns = best_pair.get("txns", {})
+            m5_txns = txns.get("m5", {})
+            buys_m5 = int(m5_txns.get("buys") or 0)
+            sells_m5 = int(m5_txns.get("sells") or 0)
 
             pair_url = best_pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
@@ -116,12 +123,44 @@ class MarketSniffer:
                 "h1": h1,
                 "h24": h24,
                 "vol_24h": vol_24h,
+                "vol_h1": vol_h1,
+                "vol_m5": vol_m5,
+                "buys_m5": buys_m5,
+                "sells_m5": sells_m5,
                 "pair_url": pair_url,
                 "dex": best_pair.get("dexId", "Raydium"),
             }
         except Exception as e:
             print(f"Error fetching DexScreener market data: {e}")
             return None
+
+    @classmethod
+    def get_trending_solana_mints(cls, limit: int = 40) -> List[str]:
+        """
+        Discovers live trending and boosted Solana tokens directly from DexScreener.
+        Requires zero API keys.
+        """
+        endpoints = [
+            "https://api.dexscreener.com/token-boosts/top/v1",
+            "https://api.dexscreener.com/token-boosts/latest/v1",
+        ]
+        mints = []
+        for url in endpoints:
+            try:
+                res = requests.get(url, timeout=6)
+                if res.status_code == 200:
+                    data = res.json()
+                    if isinstance(data, list):
+                        for item in data:
+                            if item.get("chainId") == "solana":
+                                addr = item.get("tokenAddress")
+                                if addr and addr not in mints and cls.is_valid_solana_address(addr):
+                                    mints.append(addr)
+                                    if len(mints) >= limit:
+                                        return mints
+            except Exception as e:
+                print(f"Error scanning trending mints from {url}: {e}")
+        return mints
 
     @staticmethod
     def get_security_audit(mint: str) -> Dict[str, Any]:

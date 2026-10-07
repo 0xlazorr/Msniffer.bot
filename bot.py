@@ -31,7 +31,7 @@ from telegram.ext import (
 import asyncio
 import math
 
-from config import BOT_TOKEN, FEE_RESERVE_SOL, ADMIN_USER_ID, USDT_MINT
+from config import BOT_TOKEN, FEE_RESERVE_SOL, ADMIN_USER_ID, USDT_MINT, DEFAULT_SLIPPAGE_BPS
 from wallet_manager import WalletManager
 from sniffer import MarketSniffer, format_currency
 from jupiter_swap import JupiterSwapEngine
@@ -1428,9 +1428,12 @@ async def background_trader_worker(application: Application):
     """
     logger.info("🚀 Background Copy Trading & AI Autopilot worker loop started.")
     initialized_targets = set()
+    last_market_scan_time = 0.0
 
     while True:
         try:
+            now = time.time()
+
             # --- 1. COPY TRADING MONITOR ---
             active_copy = SettingsManager.get_active_copy_traders()
             for user_id, settings in active_copy:
@@ -1546,6 +1549,87 @@ async def background_trader_worker(application: Application):
                             )
                         except Exception:
                             pass
+
+            # --- 3. AUTONOMOUS ALGORITHMIC MARKET SCANNER & AUTO-TRADER ---
+            if active_ai and (now - last_market_scan_time) >= 40.0:
+                last_market_scan_time = now
+                for user_id, settings in active_ai:
+                    # Cooldown check: 10 minutes between automated buys per user
+                    last_buy_time = settings.get("last_ai_trade_time", 0.0)
+                    if (now - last_buy_time) < 600.0:
+                        continue
+
+                    pubkey = WalletManager.get_public_key(user_id)
+                    if not pubkey:
+                        continue
+
+                    # Balance check: ensure user has enough SOL to cover trade + gas reserve
+                    trade_amt = float(settings.get("ai_trade_amount_sol", 0.1))
+                    sol_bal = WalletManager.get_sol_balance(pubkey)
+                    if sol_bal < (trade_amt + FEE_RESERVE_SOL + 0.01):
+                        continue
+
+                    # Position count limit: max 3 open positions simultaneously
+                    positions = WalletManager.get_all_positions(pubkey)
+                    active_pos = [p for p in positions if p.get("ui_amount", 0.0) > 0.0001]
+                    if len(active_pos) >= 3:
+                        continue
+
+                    owned_mints = [p["mint"] for p in active_pos]
+                    strategy = settings.get("ai_strategy", "BALANCED")
+
+                    # Run Pattern Recognition Scanner across live Solana market
+                    candidate = AITradingEngine.scan_and_select_trade_candidate(
+                        strategy=strategy,
+                        user_positions=owned_mints
+                    )
+
+                    if candidate:
+                        mint = candidate["mint"]
+                        market = candidate.get("market", {})
+                        symbol = market.get("symbol", "TOKEN")
+                        price_usd = market.get("price_usd", 0.0)
+                        pattern = candidate.get("pattern", "Volume Surge & Breakout")
+                        score = candidate.get("score", 75.0)
+
+                        keypair = WalletManager.get_keypair(user_id)
+                        slippage = int(settings.get("slippage_bps", DEFAULT_SLIPPAGE_BPS))
+
+                        success, sig_or_err, quote = JupiterSwapEngine.execute_buy(
+                            keypair, mint, trade_amt, slippage_bps=slippage
+                        )
+
+                        if success:
+                            e_prices = settings.get("entry_prices", {})
+                            e_prices[mint] = price_usd
+                            SettingsManager.update_user_settings(user_id, {
+                                "entry_prices": e_prices,
+                                "last_ai_trade_time": now,
+                            })
+
+                            tp_pct = settings.get("ai_take_profit_pct", 30.0)
+                            sl_pct = settings.get("ai_stop_loss_pct", 15.0)
+
+                            alert_text = (
+                                "🤖 <b>ALGORITHMIC AUTOPILOT BUY EXECUTED!</b>\n\n"
+                                f"🪙 <b>Token:</b> ${html.escape(symbol)} (<code>{mint}</code>)\n"
+                                f"📊 <b>Pattern Detected:</b> <i>{html.escape(pattern)}</i>\n"
+                                f"🎯 <b>Strategy:</b> <b>{strategy}</b> (Pattern Score: <b>{score:.0f}/100</b>)\n"
+                                f"💸 <b>Amount Spent:</b> <code>{trade_amt} SOL</code>\n"
+                                f"📈 <b>Take Profit:</b> <code>+{tp_pct:.0f}%</code> | <b>Stop Loss:</b> <code>-{sl_pct:.0f}%</code>\n\n"
+                                f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>"
+                            )
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=user_id,
+                                    text=alert_text,
+                                    parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True
+                                )
+                            except Exception as err:
+                                logger.error(f"Failed to send auto-trade alert to {user_id}: {err}")
+                        else:
+                            logger.warning(f"Auto-trade buy failed for {user_id} on {mint}: {sig_or_err}")
 
         except Exception as e:
             logger.error(f"Error in background trader worker: {e}", exc_info=True)

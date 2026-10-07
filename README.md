@@ -1,61 +1,96 @@
-# 🐕🔎 Market Sniffer — Solana Degen Trading Bot
+# 🐕🔎 Market Sniffer — Solana Sniper, Copy & Algorithmic AI Auto-Trader
 
-A high-speed, security-first Solana trading bot built for Telegram. Simply paste any **Token Contract Address (CA)** into the chat to immediately audit its safety (Honeypot, Freeze Authority, Mint Authority, Top Holders) and execute swaps via **Jupiter Aggregator** with one tap.
-
----
-
-## 🛡️ Financial & Security Architecture
-
-1. **Local AES-256 Encrypted Keystore**:
-   - Each user receives an auto-generated Ed25519 Solana wallet keypair.
-   - Private keys are encrypted at rest with AES-256 (Fernet) in `data/wallets.enc` (`chmod 600`).
-   - Private keys are **never** logged, **never** transmitted to any external server, and only decrypted in volatile memory when signing a transaction.
-2. **Phantom / Solflare Integration**:
-   - Easily export your bot wallet's Base58 private key with `/wallet` → **Export Private Key** to manage, track, or trade inside Phantom or Solflare.
-3. **Automated "Sniffer" Security Audits**:
-   - **Freeze Authority Check**: Flags tokens where the creator can freeze trading or blacklist your wallet.
-   - **Mint Authority Check**: Detects if infinite tokens can be minted and dumped.
-   - **Top 10 Holder Concentration**: Calculates percentage of supply held by top wallets.
-   - **RugCheck Risk Score**: Instant rating: 🟢 LOW RISK | 🟡 CAUTION | 🚨 HIGH DANGER.
-4. **MEV-Resistant Swap Execution**:
-   - Powered by **Jupiter Aggregator v1 API** (routes through Raydium, Orca, Meteora, Pump.fun).
-   - Dynamic compute unit limits & automatic priority fees to land transactions quickly without sandwich attacks.
-5. **Fee Reserve Buffer**:
-   - Enforces a `0.005 SOL` safety reserve so your wallet never gets bricked with zero balance for gas fees.
+A high-speed, institutional-grade Solana trading bot built for Telegram. Audit token contracts, mirror insider whale trades on-chain, or run autonomous algorithmic trading using real-time volume breakout & momentum pattern recognition (with zero external AI API required, plus pluggable OpenAI/Grok/Claude support).
 
 ---
 
-## ⚡ Commands & Interactions
+## 🌟 Key Features
 
-| Action | Description |
-|---|---|
-| `/start` | Displays welcome screen, your bot wallet address, and balance. |
-| `/wallet` | View address, live SOL balance, export Phantom key, or withdraw funds. |
-| `Paste any CA` | Instantly audits token metrics & security, offering `[ Buy 0.1 SOL ]`, `[ Buy 0.5 SOL ]`, etc. |
-| `[ 🔴 Sell % ]` | Instant 1-tap sell buttons (25%, 50%, 100%) to swap tokens back to native SOL. |
+### 1. 🐕 Token Sniffer & Security Auditor
+- **Instant Contract Sniffing:** Paste any Solana Token Contract Address (CA), pump.fun URL, or DexScreener link.
+- **Honeypot & Freeze Authority Gate:** Strictly identifies tokens with active freeze authority or mint permissions.
+- **Holder Distribution & RugCheck:** Verifies top 10 concentration, LP lock status, and safety risk ratings.
+- **1-Tap Swap Execution:** Instant buy buttons (`0.1`, `0.25`, `0.5`, `1.0 SOL`, or custom) routed through **Jupiter Aggregator v1**.
+
+### 2. 🎯 On-Chain Copy Trading Engine (`/copy`)
+- **Universal Swap Detection:** Compares Solana `preTokenBalances` vs `postTokenBalances` on target wallets. Detects swaps across **Raydium**, **Pump.fun**, **Jupiter**, and **Orca** DEX programs.
+- **Automated Mirroring:** Automatically executes matching buys and sells in real-time with sub-3-second polling.
+- **Customizable Execution:** Customize copy buy size in SOL, slippage tolerance, and toggle auto-selling on/off.
+
+### 3. ⚡ Autonomous Algorithmic & Pattern Recognition Engine (`/ai`)
+- **Zero-API Key Required:** Operates 100% autonomously out-of-the-box using quantitative technical pattern recognition:
+  - **Volume Acceleration Pattern:** Detects 5-minute volume surges relative to hourly moving averages.
+  - **Buy Pressure Ratio:** Tracks net buyer accumulation (`buys_m5` vs `sells_m5`).
+  - **Momentum & Trend Alignment:** Validates positive velocity without buying overextended parabolic tops.
+  - **Safety Gate:** Filters out honeypots, active mint authorities, and high-risk contracts.
+- **Strategy Profiles:**
+  - **Balanced:** High-momentum breakouts with verified liquidity ($15K+) and revoked authorities.
+  - **Degen:** Aggressive pump.fun curve volume scalping ($4K+ liquidity).
+  - **Conservative:** Ultra-safe $50K+ liquidity with zero audit warnings.
+- **Pluggable AI APIs (Optional):** Add `AI_API_KEY` for **OpenAI** (`gpt-4o-mini`), **Grok (xAI)** (`grok-beta`), or **Anthropic Claude** to get deep LLM reasoning on top of quant metrics.
+- **Automated Risk Management (TP / SL):** Automatically monitors positions and executes Take Profit (`+30%`) or Stop Loss (`-15%`) exits.
+- **Safety Safeguards:** 10-minute auto-buy cooldown, maximum 3 simultaneous active positions, and automatic gas balance floor protection.
+
+### 4. 💳 Wallet Management & Phantom / Solflare Import (`/wallet`, `/import`)
+- **Direct Wallet Import:** Connect an existing Phantom or Solflare wallet via Base58 private key or JSON byte array.
+- **Zero Plaintext Trace:** Messages containing private keys are automatically deleted from Telegram chat history immediately upon receipt.
+- **Encrypted Storage:** Keystore and settings are encrypted at rest with AES-256 Fernet (`chmod 0600`).
+- **Withdraw & Export:** Easily withdraw native SOL or export keys at any time.
+
+---
+
+## 🛡️ Security Architecture
+
+1. **Local AES-256 Encrypted Keystore**: Keys are encrypted at rest with AES-256 (`data/wallets.enc`, `chmod 0600`) and only decrypted in memory when signing.
+2. **Private Chat Isolation**: Sensitive commands (`/wallet`, `/import`, `/alpha`) are strictly forbidden in public groups.
+3. **MEV-Resistant Routing**: Dynamic compute unit limits and priority fees prevent sandwich attacks.
+4. **Gas Overdraft Protection**: Preserves a minimum `0.005 SOL` safety reserve so wallets never become bricked.
+
+---
+
+## ⚡ Telegram Commands
+
+| Command | Action |
+| :--- | :--- |
+| `/start` | Open the main dashboard with active mode badge (`🎯 Copy`, `🤖 AI`, or `⏸️ Manual`) |
+| `/copy` | Open Copy Trading settings (set target wallet, copy buy size, toggle auto-sells) |
+| `/ai` | Open AI / Algorithmic Autopilot settings (strategy, trade size, TP/SL targets) |
+| `/import` | Securely import an existing Phantom or Solflare wallet |
+| `/wallet` | View SOL & USDT balances, deposit address, withdraw funds, export key |
+| `/positions` | View open token holdings with quick-sell buttons |
+| `/swap` | Quick swap SOL ⇄ USDT |
+| `/alpha` | Access the hidden Alpha Wallet dashboard *(admin only)* |
+| `/cancel` | Cancel any pending input prompt |
 
 ---
 
 ## 🚀 Setup & Installation
 
 ### 1. Requirements
-Ensure Python 3.10+ is installed:
+Python 3.10+ on Linux / macOS / Windows.
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Telegram Bot Token
-1. Open [@BotFather](https://t.me/BotFather) on Telegram and run `/newbot`.
-2. Name your bot `Market Sniffer` and choose a username.
-3. Paste the token into `.env`:
+### 2. Configuration
+Create `.env` based on `.env.example`:
 ```env
-BOT_TOKEN=your_token_from_botfather
+BOT_TOKEN=your_telegram_bot_token_from_botfather
 RPC_ENDPOINT=https://api.mainnet-beta.solana.com
 DEFAULT_SLIPPAGE_BPS=300
+FEE_PERCENT=0.01
+
+# Optional: Add external AI API key (OpenAI, Grok, Anthropic)
+# If omitted, the bot runs via the built-in Algorithmic Pattern Recognition Engine
+AI_PROVIDER=openai
+AI_API_KEY=
+AI_MODEL=
 ```
 
-### 3. Start the Bot
+### 3. Run the Bot
 ```bash
+python3 bot.py
+# or
 ./start.sh
 ```
 
@@ -64,14 +99,13 @@ DEFAULT_SLIPPAGE_BPS=300
 ## 📦 Project Structure
 
 ```
-/home/lazorr/market_sniffer_bot/
-├── bot.py              # Telegram bot UI, command handlers, and interactive menus
-├── sniffer.py          # DexScreener analytics & RugCheck security audit engine
-├── wallet_manager.py   # Encrypted keystore, Phantom export, balance checks, transfers
-├── jupiter_swap.py     # Jupiter v1 quote routing, transaction signing, and swap execution
-├── config.py           # Configuration and safety parameters
+├── bot.py              # Telegram bot UI, command handlers, and background trader loop
+├── sniffer.py          # DexScreener market analytics, trending scanner & RugCheck auditor
+├── ai_engine.py        # Algorithmic pattern recognition & pluggable LLM auto-trader
+├── copy_engine.py      # On-chain target wallet swap parser & mirrored execution engine
+├── wallet_manager.py   # AES-256 encrypted keystore, wallet import, transfers, and export
+├── jupiter_swap.py     # Jupiter Aggregator v1 swap quotes, fee routing & transaction signing
+├── config.py           # Environment variables, token constants, and storage paths
 ├── requirements.txt    # Python dependencies
-├── start.sh            # Quick execution script
-├── .gitignore          # Prevents keys, credentials, and data/ from being tracked
-└── data/               # AES-256 encrypted wallet storage (restricted permissions)
+└── start.sh            # Service launcher script
 ```

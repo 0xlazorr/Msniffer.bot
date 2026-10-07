@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -16,17 +17,20 @@ from jupiter_swap import JupiterSwapEngine
 class AITradingEngine:
     """
     Intelligent Autonomous Trading Engine.
-    Supports OpenAI, Grok (xAI), Anthropic Claude, and Gemini,
-    with an institutional Quantitative Rule-Based fallback.
+    Operates via full Algorithmic & Pattern Recognition by default (zero API key needed),
+    and seamlessly plugs in OpenAI, Grok (xAI), or Anthropic Claude when configured.
     """
+
+    # Memory cache to throttle repeated evaluations of recently audited mints
+    _recently_checked_mints: Dict[str, float] = {}
 
     @classmethod
     def get_status(cls) -> Dict[str, Any]:
-        """Returns current AI configuration state"""
+        """Returns current AI / Algorithmic configuration state"""
         has_key = bool(AI_API_KEY)
         provider = AI_PROVIDER.capitalize() if AI_PROVIDER else "OpenAI"
         model = AI_MODEL or ("gpt-4o-mini" if provider.lower() == "openai" else "grok-beta")
-        mode_desc = f"{provider} ({model})" if has_key else "Smart Quantitative Algorithmic AI"
+        mode_desc = f"{provider} ({model})" if has_key else "⚡ Autonomous Algorithmic & Pattern Recognition"
         return {
             "has_api_key": has_key,
             "provider": provider,
@@ -121,44 +125,88 @@ Respond STRICTLY in JSON format with no markdown wrappers:
     @classmethod
     def evaluate_quant_rules(cls, market: dict, security: dict, strategy: str) -> dict:
         """
-        Rule-based high-winrate algorithmic evaluator.
-        Enforces strict safety: honeypots rejected, high concentration rejected.
+        Institutional Pattern Recognition & Rule-Based Algorithmic Evaluator.
+        Operates fully autonomously without needing external AI API keys.
         """
-        # Hard safety filters (applies to all strategies)
+        # 1. Hard safety filters (applies to all strategies)
         if security.get("freeze_authority") == "ACTIVE":
-            return {"decision": "SKIP", "confidence": 0.0, "reason": "Honeypot: Freeze authority active"}
+            return {"decision": "SKIP", "confidence": 0.0, "score": 0, "reason": "Honeypot: Freeze authority active", "pattern": "Honeypot Trap"}
         if security.get("mint_authority") == "ACTIVE":
-            return {"decision": "SKIP", "confidence": 0.0, "reason": "Danger: Mint authority active"}
+            return {"decision": "SKIP", "confidence": 0.0, "score": 0, "reason": "Danger: Mint authority active", "pattern": "Inflation Trap"}
+        if security.get("risk_level") in ("DANGER", "HIGH RISK"):
+            return {"decision": "SKIP", "confidence": 0.0, "score": 0, "reason": "Security: High risk warnings detected", "pattern": "Malicious Rug"}
 
         liq = market.get("liquidity_usd", 0.0)
         top10 = security.get("top10_pct", 0.0)
         m5 = market.get("m5", 0.0)
         h1 = market.get("h1", 0.0)
+        buys_m5 = market.get("buys_m5", 0)
+        sells_m5 = market.get("sells_m5", 0)
 
+        # Pattern scoring: 0 - 100
+        score = 50
+        pattern_name = "Neutral Momentum"
+
+        # Pattern 1: Buy Pressure vs Sell Pressure
+        if buys_m5 > (sells_m5 * 1.3) and buys_m5 >= 5:
+            score += 20
+            pattern_name = "Bullish Accumulation & Buy Pressure"
+        elif buys_m5 >= sells_m5 and buys_m5 >= 2:
+            score += 10
+            pattern_name = "Positive Momentum Flow"
+        elif sells_m5 > (buys_m5 * 1.5):
+            score -= 20
+            pattern_name = "Sell Distribution / Dumping"
+
+        # Pattern 2: Short-term price breakout
+        if m5 > 2.5:
+            score += 15
+        elif m5 >= 0:
+            score += 5
+        else:
+            score -= 10
+
+        # Pattern 3: Medium-term trend (1h)
+        if 2.0 <= h1 <= 80.0:
+            score += 15
+        elif h1 > 80.0:
+            score -= 5  # Overextended pump risk
+        elif h1 < -10.0:
+            score -= 15
+
+        # Pattern 4: Holder decentralization
+        if top10 < 30.0:
+            score += 15
+        elif top10 < 50.0:
+            score += 5
+        elif top10 > 65.0:
+            score -= 20
+
+        # Strategy threshold enforcement
         if strategy == "CONSERVATIVE":
             if liq < 50_000:
-                return {"decision": "SKIP", "confidence": 0.2, "reason": "Liquidity under $50K threshold"}
-            if top10 > 45.0:
-                return {"decision": "SKIP", "confidence": 0.3, "reason": "Top 10 concentration > 45%"}
-            if m5 < 1.0 or h1 < 3.0:
-                return {"decision": "SKIP", "confidence": 0.4, "reason": "Insufficient momentum"}
-            return {"decision": "BUY", "confidence": 0.88, "reason": "High liquidity & steady positive momentum"}
+                return {"decision": "SKIP", "confidence": 0.2, "score": score, "reason": "Liquidity under $50K threshold", "pattern": pattern_name}
+            if top10 > 40.0:
+                return {"decision": "SKIP", "confidence": 0.3, "score": score, "reason": "Top 10 concentration > 40%", "pattern": pattern_name}
+            if score >= 75 and m5 > 0.5:
+                return {"decision": "BUY", "confidence": min(0.95, score / 100.0), "score": score, "reason": "High liquidity & steady breakout pattern", "pattern": pattern_name}
+            return {"decision": "SKIP", "confidence": 0.4, "score": score, "reason": "Did not meet conservative pattern score", "pattern": pattern_name}
 
         elif strategy == "DEGEN":
             if liq < 4_000:
-                return {"decision": "SKIP", "confidence": 0.1, "reason": "Liquidity too thin (<$4K)"}
-            if m5 > 8.0 and top10 < 65.0:
-                return {"decision": "BUY", "confidence": 0.85, "reason": "Strong 5m breakout momentum"}
-            return {"decision": "SKIP", "confidence": 0.5, "reason": "Waiting for breakout spike"}
+                return {"decision": "SKIP", "confidence": 0.1, "score": score, "reason": "Liquidity too thin (<$4K)", "pattern": pattern_name}
+            if score >= 60 and m5 > 1.5:
+                return {"decision": "BUY", "confidence": min(0.92, score / 100.0), "score": score, "reason": "Aggressive early momentum breakout", "pattern": pattern_name}
+            return {"decision": "SKIP", "confidence": 0.3, "score": score, "reason": "Waiting for volume spike", "pattern": pattern_name}
 
         else:  # BALANCED
             if liq < 15_000:
-                return {"decision": "SKIP", "confidence": 0.2, "reason": "Liquidity under $15K threshold"}
+                return {"decision": "SKIP", "confidence": 0.2, "score": score, "reason": "Liquidity under $15K threshold", "pattern": pattern_name}
             if top10 > 55.0:
-                return {"decision": "SKIP", "confidence": 0.3, "reason": "Top 10 concentration > 55%"}
-            if m5 > 2.0 or (h1 > 5.0 and m5 >= 0.0):
-                return {"decision": "BUY", "confidence": 0.82, "reason": "Favorable volume & clean safety audit"}
-            return {"decision": "SKIP", "confidence": 0.4, "reason": "Consolidation phase"}
+                return {"decision": "SKIP", "confidence": 0.3, "score": score, "reason": "Top 10 concentration > 55%", "pattern": pattern_name}
+            if score >= 70 and m5 >= 0.0:
+                return {"decision": "BUY", "confidence": min(0.90, score / 100.0), "score": score, "reason": "Strong volume accumulation & clean safety pattern", "pattern": pattern_name}
+            return {"decision": "SKIP", "confidence": 0.4, "score": score, "reason": "Did not meet balanced pattern threshold", "pattern": pattern_name}
 
     @classmethod
     def evaluate_token(cls, mint: str, strategy: str = "BALANCED") -> dict:
@@ -171,15 +219,78 @@ Respond STRICTLY in JSON format with no markdown wrappers:
         if AI_API_KEY:
             llm_result = cls.consult_llm(market, security, strategy)
             if llm_result and "decision" in llm_result:
+                # Enforce hard safety rules even if LLM said BUY
+                if llm_result["decision"] == "BUY":
+                    if security.get("freeze_authority") == "ACTIVE" or security.get("mint_authority") == "ACTIVE":
+                        llm_result["decision"] = "SKIP"
+                        llm_result["reason"] = "Honeypot protection override"
                 llm_result["market"] = market
                 llm_result["security"] = security
                 return llm_result
 
-        # Quant fallback
+        # Algorithmic pattern recognition fallback
         res = cls.evaluate_quant_rules(market, security, strategy)
         res["market"] = market
         res["security"] = security
         return res
+
+    @classmethod
+    def scan_and_select_trade_candidate(
+        cls,
+        strategy: str = "BALANCED",
+        user_positions: Optional[List[str]] = None
+    ) -> Optional[dict]:
+        """
+        Scans live Solana market for tokens matching breakout & volume patterns.
+        Filters candidates through fast market pre-filters, safety gates, and strategy criteria.
+        Returns top trade candidate or None.
+        """
+        user_positions = user_positions or []
+        mints = MarketSniffer.get_trending_solana_mints(limit=15)
+        best_candidate = None
+        highest_score = -1.0
+
+        min_liq = 50_000 if strategy == "CONSERVATIVE" else (15_000 if strategy == "BALANCED" else 4_000)
+
+        now = time.time()
+        for mint in mints:
+            if mint in user_positions:
+                continue
+
+            # Don't re-audit same token if evaluated in last 3 minutes
+            last_checked = cls._recently_checked_mints.get(mint, 0)
+            if (now - last_checked) < 180:
+                continue
+
+            cls._recently_checked_mints[mint] = now
+            if len(cls._recently_checked_mints) > 200:
+                cls._recently_checked_mints.pop(next(iter(cls._recently_checked_mints)))
+
+            try:
+                # Fast pre-filter: Check DexScreener market first
+                m_data = MarketSniffer.get_market_data(mint)
+                if not m_data or m_data.get("liquidity_usd", 0.0) < min_liq or m_data.get("m5", -1.0) < 0.0:
+                    continue
+
+                # Pass to full evaluation (security audit + pattern recognizer / LLM)
+                eval_res = cls.evaluate_token(mint, strategy=strategy)
+                if eval_res.get("decision") == "BUY":
+                    score = float(eval_res.get("score") or (eval_res.get("confidence", 0.0) * 100))
+                    if score > highest_score:
+                        highest_score = score
+                        best_candidate = {
+                            "mint": mint,
+                            "market": eval_res.get("market", {}),
+                            "security": eval_res.get("security", {}),
+                            "confidence": eval_res.get("confidence", 0.0),
+                            "score": score,
+                            "pattern": eval_res.get("pattern", "Volume Surge & Breakout"),
+                            "reason": eval_res.get("reason", "Pattern confirmed"),
+                        }
+            except Exception as e:
+                print(f"Error evaluating candidate {mint}: {e}")
+
+        return best_candidate
 
     @classmethod
     def check_position_exits(
