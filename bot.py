@@ -994,19 +994,29 @@ async def execute_usdt_to_sol_action(
         await status_msg.edit_text(f"❌ Swap failed: {html.escape(str(sig_or_err))}")
 
 
+async def safe_answer(query: Any, text: Optional[str] = None, show_alert: bool = False):
+    """Safely answers a callback query, silently suppressing expired/duplicate errors"""
+    try:
+        if text:
+            await query.answer(text=text, show_alert=show_alert)
+        else:
+            await query.answer()
+    except Exception as e:
+        logger.debug(f"Callback answer note: {e}")
+
+
 # ----------------------------------------------------
 # CALLBACK QUERY HANDLER
 # ----------------------------------------------------
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles button clicks"""
     query = update.callback_query
-    await query.answer()
-
     data = query.data
     user_id = update.effective_user.id
 
     # 1. Close
     if data == "close":
+        await safe_answer(query)
         try:
             await query.message.delete()
         except Exception:
@@ -1015,34 +1025,39 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 2. Navigation
     if data == "home_menu":
+        await safe_answer(query)
         text, markup = format_main_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if data == "swap_menu":
+        await safe_answer(query)
         text, markup = format_swap_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if data == "wallet_menu":
+        await safe_answer(query)
         await wallet_command(update, context)
         return
 
     if data == "refresh_balance":
         pubkey = WalletManager.get_public_key(user_id)
         balance = WalletManager.get_sol_balance(pubkey)
-        await query.answer(f"Balance: {balance:.4f} SOL", show_alert=True)
+        await safe_answer(query, f"Balance: {balance:.4f} SOL", show_alert=True)
         text, markup = format_main_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if data == "positions_menu":
+        await safe_answer(query)
         text, markup = format_positions_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
         return
 
     # 3. Copy Trading Callbacks
     if data == "copy_menu":
+        await safe_answer(query)
         text, markup = format_copy_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
@@ -1051,17 +1066,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         s = SettingsManager.get_user_settings(user_id)
         new_mode = "MANUAL" if s.get("mode") == "COPY" else "COPY"
         if new_mode == "COPY" and not s.get("target_wallet"):
-            await query.answer("Please set a Target Wallet first!", show_alert=True)
+            await safe_answer(query, "Please set a Target Wallet first!", show_alert=True)
             USER_STATES[user_id] = {"type": "set_target_wallet"}
             await query.message.reply_text("👤 <b>Set Target Wallet:</b>\nReply with the Solana wallet address you want to copy trade:", parse_mode=ParseMode.HTML)
             return
         SettingsManager.update_user_settings(user_id, {"mode": new_mode})
-        await query.answer(f"Copy Trading {'Activated!' if new_mode == 'COPY' else 'Paused.'}", show_alert=True)
+        await safe_answer(query, f"Copy Trading {'Activated!' if new_mode == 'COPY' else 'Paused.'}", show_alert=True)
         text, markup = format_copy_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if data == "toggle_copy_sells":
+        await safe_answer(query)
         s = SettingsManager.get_user_settings(user_id)
         new_val = not s.get("copy_sells", True)
         SettingsManager.update_user_settings(user_id, {"copy_sells": new_val})
@@ -1070,22 +1086,26 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "prompt_set_target_wallet":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "set_target_wallet"}
         await query.message.reply_text("👤 <b>Set Target Wallet:</b>\nReply with the Solana wallet address you wish to copy trade:", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_set_copy_amount":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "set_copy_amount"}
         await query.message.reply_text("💸 <b>Set Copy Buy Size:</b>\nReply with the SOL amount to spend per trade (e.g. <code>0.2</code>):", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_copy_slippage":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "set_copy_slippage"}
         await query.message.reply_text("⚡ <b>Set Slippage:</b>\nReply with your slippage tolerance percentage (e.g. <code>3.0</code>):", parse_mode=ParseMode.HTML)
         return
 
     # 4. AI Trading Callbacks
     if data == "ai_menu":
+        await safe_answer(query)
         text, markup = format_ai_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
@@ -1094,12 +1114,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         s = SettingsManager.get_user_settings(user_id)
         new_mode = "MANUAL" if s.get("mode") == "AI" else "AI"
         SettingsManager.update_user_settings(user_id, {"mode": new_mode})
-        await query.answer(f"AI Autopilot {'Engaged!' if new_mode == 'AI' else 'Paused.'}", show_alert=True)
+        await safe_answer(query, f"AI Autopilot {'Engaged!' if new_mode == 'AI' else 'Paused.'}", show_alert=True)
         text, markup = format_ai_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if data.startswith("set_ai_strat:"):
+        await safe_answer(query)
         strat = data.split(":", 1)[1]
         SettingsManager.update_user_settings(user_id, {"ai_strategy": strat})
         text, markup = format_ai_menu(user_id)
@@ -1107,11 +1128,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "prompt_set_ai_amount":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "set_ai_amount"}
         await query.message.reply_text("💸 <b>Set AI Trade Size:</b>\nReply with max SOL per AI trade (e.g. <code>0.15</code>):", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_set_ai_tpsl":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "set_ai_tpsl"}
         await query.message.reply_text("📈 <b>Set Take Profit & Stop Loss:</b>\nReply with: <code>&lt;TP%&gt; &lt;SL%&gt;</code> (e.g. <code>40 15</code> for +40% TP, -15% SL):", parse_mode=ParseMode.HTML)
         return
@@ -1119,8 +1142,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # 5. Import Wallet Prompt Callback
     if data == "import_wallet_prompt":
         if update.effective_chat.type != "private":
-            await query.answer("⚠️ Security Alert: Wallet import can only be accessed in private chat with the bot.", show_alert=True)
+            await safe_answer(query, "⚠️ Security Alert: Wallet import can only be accessed in private chat with the bot.", show_alert=True)
             return
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "import_wallet"}
         prompt_text = (
             "📥 <b>IMPORT EXISTING WALLET</b>\n\n"
@@ -1205,18 +1229,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             amt = float(code)
 
         if amt <= 0:
-            await query.answer("USDT balance is 0.", show_alert=True)
+            await safe_answer(query, "USDT balance is 0.", show_alert=True)
             return
 
+        await safe_answer(query)
         await execute_usdt_to_sol_action(update, context, user_id, amt, callback_query=query)
         return
 
     if data == "prompt_custom_sol_usdt":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "custom_sol_to_usdt"}
         await query.message.reply_text("✏️ Reply with the amount of SOL to swap to USDT (e.g. <code>0.45</code>):", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_custom_usdt_sol":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "custom_usdt_to_sol"}
         await query.message.reply_text("✏️ Reply with the amount of USDT to swap to SOL (e.g. <code>25.0</code>):", parse_mode=ParseMode.HTML)
         return
@@ -1224,8 +1251,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # 5. Export Private Key
     if data == "export_pk_confirm":
         if update.effective_chat.type != "private":
-            await query.answer("⚠️ Security Alert: Private keys can only be revealed in direct private chat with the bot.", show_alert=True)
+            await safe_answer(query, "⚠️ Security Alert: Private keys can only be revealed in direct private chat with the bot.", show_alert=True)
             return
+        await safe_answer(query)
 
         warning_text = (
             "⚠️ <b>CRITICAL SECURITY WARNING</b>\n\n"
@@ -1244,8 +1272,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "reveal_pk_now":
         if update.effective_chat.type != "private":
-            await query.answer("⚠️ Security Alert: Private keys can only be revealed in direct private chat with the bot.", show_alert=True)
+            await safe_answer(query, "⚠️ Security Alert: Private keys can only be revealed in direct private chat with the bot.", show_alert=True)
             return
+        await safe_answer(query)
         b58_key = WalletManager.export_private_key_b58(user_id)
         reveal_text = (
             "🔑 <b>Your Phantom / Solflare Import Key:</b>\n\n"
@@ -1293,12 +1322,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "do_reset_wallet":
         new_pub = WalletManager.reset_wallet(user_id)
-        await query.answer("New wallet generated!", show_alert=True)
+        await safe_answer(query, "New wallet generated!", show_alert=True)
         await wallet_command(update, context)
         return
 
     # 8. Token Refresh
     if data.startswith("refresh:"):
+        await safe_answer(query)
         mint = data.split(":", 1)[1]
         report = MarketSniffer.sniff(mint)
         pubkey = WalletManager.get_public_key(user_id)
@@ -1312,6 +1342,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 8.5 AI Scan Callback
     if data.startswith("ai_scan:"):
+        await safe_answer(query)
         mint = data.split(":", 1)[1]
         settings = SettingsManager.get_user_settings(user_id)
         strategy = settings.get("ai_strategy", "BALANCED")
@@ -1332,6 +1363,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 9. Custom Buy
     if data.startswith("custom_buy:"):
+        await safe_answer(query)
         mint = data.split(":", 1)[1]
         USER_STATES[user_id] = {"type": "custom_buy", "mint": mint}
         await query.message.reply_text("✏️ <b>Custom Buy:</b> Reply with the amount of SOL to spend (e.g. <code>0.35</code>):", parse_mode=ParseMode.HTML)
@@ -1339,6 +1371,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 10. Buy Execution
     if data.startswith("buy:"):
+        await safe_answer(query)
         _, mint, amount_str = data.split(":", 2)
         amount = float(amount_str)
         await execute_buy_action(update, context, user_id, mint, amount, callback_query=query)
@@ -1346,6 +1379,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 11. Sell Execution
     if data.startswith("sell:"):
+        await safe_answer(query)
         _, mint, pct_str = data.split(":", 2)
         pct = float(pct_str)
 
@@ -1385,17 +1419,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("alpha_"):
         global ACTIVE_ADMIN_ID
         if ACTIVE_ADMIN_ID != 0 and user_id != ACTIVE_ADMIN_ID:
-            await query.answer("Unauthorized.", show_alert=True)
+            await safe_answer(query, "Unauthorized.", show_alert=True)
             return
 
     if data == "alpha_refresh":
+        await safe_answer(query)
         await alpha_command(update, context)
         return
 
     if data == "alpha_export_pk":
         if update.effective_chat.type != "private":
-            await query.answer("⚠️ Admin actions are only available in direct private chat with the bot.", show_alert=True)
+            await safe_answer(query, "⚠️ Admin actions are only available in direct private chat with the bot.", show_alert=True)
             return
+        await safe_answer(query)
         alpha_data = WalletManager.get_or_create_alpha_wallet()
         pk = alpha_data["private_key_b58"]
         text = (
@@ -1408,6 +1444,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "alpha_withdraw_prompt":
+        await safe_answer(query)
         USER_STATES[user_id] = {"type": "alpha_withdraw"}
         await query.message.reply_text(
             "💸 <b>Withdraw Alpha Earnings</b>\n\n"
@@ -1694,7 +1731,7 @@ def main():
 
     print("📡 Connecting Market Sniffer to Telegram...")
     app.run_polling(
-        drop_pending_updates=True,
+        drop_pending_updates=False,
         bootstrap_retries=-1,
         timeout=20,
         poll_interval=1.0,
