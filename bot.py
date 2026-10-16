@@ -123,6 +123,7 @@ def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         ],
         [
             InlineKeyboardButton("💳 Wallet & Funds", callback_data="wallet_menu"),
+            InlineKeyboardButton("❓ Help", callback_data="help_menu"),
             InlineKeyboardButton("🔄 Refresh", callback_data="refresh_balance"),
         ]
     ])
@@ -429,6 +430,34 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Action cancelled.\n\n" + text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /help command and displays interactive feature overview"""
+    user_id = update.effective_user.id
+    USER_STATES.pop(user_id, None)
+    help_text = (
+        "🐕🔎 <b>Market Sniffer Bot — Quick Guide & Commands</b>\n\n"
+        "<b>Available Commands:</b>\n"
+        "• /start — Open the interactive main dashboard\n"
+        "• /wallet — View your address, balance, withdraw, export & import\n"
+        "• /swap — Instant SOL ⇄ USDT quick swap\n"
+        "• /positions — View your active token holdings and P&L\n"
+        "• /copy — Set up & manage on-chain Copy Trading\n"
+        "• /ai — Configure Autonomous AI Autopilot & TP/SL\n"
+        "• /import — Connect an existing Phantom/Solflare wallet\n"
+        "• /cancel — Cancel any active input prompt\n"
+        "• /help — Show this help manual\n\n"
+        "<b>How to Sniff & Trade any Token:</b>\n"
+        "Simply paste any Solana Contract Address (CA), DexScreener URL, or Pump.fun link directly into this chat. "
+        "The bot will immediately analyze liquidity, honeypot safety, mint/freeze authorities, and provide 1-tap instant buy/sell buttons!\n\n"
+        "🔒 <b>Security:</b> All private keys are stored on-server with AES-256 encryption."
+    )
+    _, markup = format_main_menu(user_id)
+    if update.callback_query:
+        await update.callback_query.message.reply_text(help_text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+    else:
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+
+
 async def copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /copy command"""
     user_id = update.effective_user.id
@@ -451,7 +480,7 @@ async def import_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ For your security, wallet import can only be done in a direct private 1-on-1 chat with the bot.")
         return
     user_id = update.effective_user.id
-    USER_STATES[user_id] = {"type": "import_wallet"}
+    USER_STATES[user_id] = {"type": "import_wallet", "_ts": time.time()}
     prompt_text = (
         "📥 <b>IMPORT EXISTING WALLET</b>\n\n"
         "Reply with your Phantom or Solflare <b>Base58 Private Key</b> (or JSON byte array):\n\n"
@@ -644,7 +673,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             status_msg = await update.message.reply_text(f"⏳ <i>Withdrawing {withdraw_amount:.4f} SOL to {dest_addr[:6]}...{dest_addr[-4:]}...</i>", parse_mode=ParseMode.HTML)
             kp = WalletManager.get_keypair(user_id)
-            success, sig_or_err = WalletManager.transfer_sol(kp, dest_addr, withdraw_amount)
+            success, sig_or_err = await asyncio.to_thread(WalletManager.transfer_sol, kp, dest_addr, withdraw_amount)
 
             if success:
                 await status_msg.edit_text(
@@ -689,7 +718,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             kp = WalletManager.get_alpha_keypair()
             status_msg = await update.message.reply_text(f"⏳ <i>Sending {withdraw_amount:.4f} SOL from Alpha wallet...</i>", parse_mode=ParseMode.HTML)
-            success, sig_or_err = WalletManager.transfer_sol(kp, dest_addr, withdraw_amount)
+            success, sig_or_err = await asyncio.to_thread(WalletManager.transfer_sol, kp, dest_addr, withdraw_amount)
             if success:
                 await status_msg.edit_text(
                     f"👑 <b>Alpha Funds Withdrawn!</b>\n\n"
@@ -844,7 +873,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            report = MarketSniffer.sniff(mint)
+            report = await asyncio.to_thread(MarketSniffer.sniff, mint)
             pubkey, _ = WalletManager.get_or_create_wallet(user_id)
             sol_bal = WalletManager.get_sol_balance(pubkey)
             token_bal, _ = WalletManager.get_token_balance(pubkey, mint)
@@ -924,11 +953,13 @@ async def execute_buy_action(
             await status_msg.edit_text("❌ Error loading wallet keys. Please check /wallet.")
             return
 
-        success, sig_or_err, quote = JupiterSwapEngine.execute_buy(keypair, mint, amount_sol)
+        success, sig_or_err, quote = await asyncio.to_thread(
+            JupiterSwapEngine.execute_buy, keypair, mint, amount_sol
+        )
 
         if success:
             try:
-                m_data = MarketSniffer.get_market_data(mint)
+                m_data = await asyncio.to_thread(MarketSniffer.get_market_data, mint)
                 if m_data and m_data.get("price_usd"):
                     u_settings = SettingsManager.get_user_settings(user_id)
                     e_prices = u_settings.get("entry_prices", {})
@@ -1005,7 +1036,9 @@ async def execute_sol_to_usdt_action(
             status_msg = await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
 
         keypair = WalletManager.get_keypair(user_id)
-        success, sig_or_err, quote = JupiterSwapEngine.swap_sol_to_usdt(keypair, amount_sol)
+        success, sig_or_err, quote = await asyncio.to_thread(
+            JupiterSwapEngine.swap_sol_to_usdt, keypair, amount_sol
+        )
 
         if success:
             out_usdt = int(quote.get("outAmount", 0)) / 1_000_000.0 if quote else 0.0
@@ -1057,7 +1090,9 @@ async def execute_usdt_to_sol_action(
             status_msg = await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
 
         keypair = WalletManager.get_keypair(user_id)
-        success, sig_or_err, quote = JupiterSwapEngine.swap_usdt_to_sol(keypair, amount_usdt)
+        success, sig_or_err, quote = await asyncio.to_thread(
+            JupiterSwapEngine.swap_usdt_to_sol, keypair, amount_usdt
+        )
 
         if success:
             out_sol = int(quote.get("outAmount", 0)) / 1_000_000_000.0 if quote else 0.0
@@ -1146,6 +1181,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await safe_answer(query)
         text, markup = format_positions_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+        return
+
+    if data == "help_menu":
+        await safe_answer(query)
+        await help_command(update, context)
         return
 
     # 3. Copy Trading Callbacks
@@ -1524,7 +1564,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
 
             keypair = WalletManager.get_keypair(user_id)
-            success, sig_or_err, quote = JupiterSwapEngine.execute_sell(keypair, mint, percentage=pct)
+            success, sig_or_err, quote = await asyncio.to_thread(
+                JupiterSwapEngine.execute_sell, keypair, mint, percentage=pct
+            )
 
             if success:
                 if pct >= 100:
@@ -1601,13 +1643,15 @@ async def background_trader_worker(application: Application):
     initialized_targets = set()
     last_market_scan_time = 0.0
 
-    while True:
+    while application.running:
         try:
             now = time.time()
 
             # --- 1. COPY TRADING MONITOR ---
             active_copy = SettingsManager.get_active_copy_traders()
             for user_id, settings in active_copy:
+                if not application.running:
+                    break
                 target = settings.get("target_wallet", "").strip()
                 if not target:
                     continue
@@ -1617,7 +1661,7 @@ async def background_trader_worker(application: Application):
                 # If target was never initialized, record current head signature without trading
                 if target not in initialized_targets and not last_sig:
                     try:
-                        recent = CopyTradingEngine.get_recent_swaps(target)
+                        recent = await asyncio.to_thread(CopyTradingEngine.get_recent_swaps, target)
                         if recent:
                             latest_sig = recent[-1][0]
                             SettingsManager.update_user_settings(user_id, {"last_seen_sig": latest_sig})
@@ -1630,7 +1674,7 @@ async def background_trader_worker(application: Application):
 
                 # Fetch any new swaps since last_seen_sig
                 try:
-                    new_swaps = CopyTradingEngine.get_recent_swaps(target, last_seen_sig=last_sig)
+                    new_swaps = await asyncio.to_thread(CopyTradingEngine.get_recent_swaps, target, last_seen_sig=last_sig)
                 except Exception as e:
                     logger.warning(f"Error querying swaps for target {target}: {e}")
                     new_swaps = []
@@ -1639,14 +1683,14 @@ async def background_trader_worker(application: Application):
                     for sig, swap_info in new_swaps:
                         SettingsManager.update_user_settings(user_id, {"last_seen_sig": sig})
 
-                        trade_res = CopyTradingEngine.execute_mirrored_trade(user_id, swap_info, settings)
+                        trade_res = await asyncio.to_thread(CopyTradingEngine.execute_mirrored_trade, user_id, swap_info, settings)
                         if trade_res:
                             action = trade_res.get("action", "SWAP")
                             mint = trade_res.get("mint", "")
 
                             if trade_res.get("success"):
                                 tx_sig = trade_res.get("sig", "")
-                                amt_info = f"<code>{trade_res.get('amount_sol', '')} SOL</code>" if action == "BUY" else "100%"
+                                amt_info = f"<code>{trade_res.get('amount_sol', '')} SOL</code>" if action == "BUY" else f"<code>{trade_res.get('sell_pct', 100.0):.0f}%</code>"
                                 alert_msg = (
                                     "🎯 <b>COPY TRADE EXECUTED!</b>\n\n"
                                     f"👤 <b>Target Wallet:</b> <code>{target[:6]}...{target[-4:]}</code>\n"
@@ -1683,6 +1727,8 @@ async def background_trader_worker(application: Application):
             # --- 2. AI POSITION EXIT MONITOR (TP / SL) ---
             active_ai = SettingsManager.get_active_ai_traders()
             for user_id, settings in active_ai:
+                if not application.running:
+                    break
                 entry_prices = settings.get("entry_prices", {})
                 if not entry_prices:
                     continue
@@ -1690,7 +1736,8 @@ async def background_trader_worker(application: Application):
                 tp = settings.get("ai_take_profit_pct", 30.0)
                 sl = settings.get("ai_stop_loss_pct", 15.0)
 
-                exits = AITradingEngine.check_position_exits(
+                exits = await asyncio.to_thread(
+                    AITradingEngine.check_position_exits,
                     user_id=user_id,
                     entry_prices=entry_prices,
                     take_profit_pct=tp,
@@ -1725,6 +1772,8 @@ async def background_trader_worker(application: Application):
             if active_ai and (now - last_market_scan_time) >= 40.0:
                 last_market_scan_time = now
                 for user_id, settings in active_ai:
+                    if not application.running:
+                        break
                     # Cooldown check: 10 minutes between automated buys per user
                     last_buy_time = settings.get("last_ai_trade_time", 0.0)
                     if (now - last_buy_time) < 600.0:
@@ -1750,7 +1799,8 @@ async def background_trader_worker(application: Application):
                     strategy = settings.get("ai_strategy", "BALANCED")
 
                     # Run Pattern Recognition Scanner across live Solana market
-                    candidate = AITradingEngine.scan_and_select_trade_candidate(
+                    candidate = await asyncio.to_thread(
+                        AITradingEngine.scan_and_select_trade_candidate,
                         strategy=strategy,
                         user_positions=owned_mints
                     )
@@ -1766,7 +1816,8 @@ async def background_trader_worker(application: Application):
                         keypair = WalletManager.get_keypair(user_id)
                         slippage = int(settings.get("slippage_bps", DEFAULT_SLIPPAGE_BPS))
 
-                        success, sig_or_err, quote = JupiterSwapEngine.execute_buy(
+                        success, sig_or_err, quote = await asyncio.to_thread(
+                            JupiterSwapEngine.execute_buy,
                             keypair, mint, trade_amt, slippage_bps=slippage
                         )
 
@@ -1802,23 +1853,36 @@ async def background_trader_worker(application: Application):
                         else:
                             logger.warning(f"Auto-trade buy failed for {user_id} on {mint}: {sig_or_err}")
 
+        except asyncio.CancelledError:
+            break
         except Exception as e:
             logger.error(f"Error in background trader worker: {e}", exc_info=True)
 
-        await asyncio.sleep(2.5)
+        try:
+            await asyncio.sleep(2.5)
+        except asyncio.CancelledError:
+            break
+
+
+BACKGROUND_WORKER_TASK = None
 
 
 async def supervised_background_worker(application: Application):
     """Supervises the background trader worker and auto-restarts on unexpected crashes"""
-    while True:
+    while application.running:
         try:
             await background_trader_worker(application)
         except asyncio.CancelledError:
             logger.info("Background trader worker cancelled.")
             break
         except Exception as e:
+            if not application.running:
+                break
             logger.critical(f"Fatal crash in background_trader_worker, restarting in 5s: {e}", exc_info=True)
-            await asyncio.sleep(5.0)
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                break
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -1828,9 +1892,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     """Executed once bot authenticates with Telegram"""
+    global BACKGROUND_WORKER_TASK
     me = application.bot
     print(f"✅ Market Sniffer Bot is live! Logged in as: {me.first_name} (@{me.username})")
-    asyncio.create_task(supervised_background_worker(application))
+    BACKGROUND_WORKER_TASK = asyncio.create_task(supervised_background_worker(application))
+
+
+async def post_shutdown(application: Application):
+    """Cleanly cancels and awaits background tasks on shutdown"""
+    global BACKGROUND_WORKER_TASK
+    if BACKGROUND_WORKER_TASK and not BACKGROUND_WORKER_TASK.done():
+        BACKGROUND_WORKER_TASK.cancel()
+        try:
+            await BACKGROUND_WORKER_TASK
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def main():
@@ -1855,11 +1931,13 @@ def main():
         .token(BOT_TOKEN)
         .request(request)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
     # Handlers
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("wallet", wallet_command))
     app.add_handler(CommandHandler("swap", swap_command))
     app.add_handler(CommandHandler("positions", positions_command))

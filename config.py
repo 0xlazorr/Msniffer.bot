@@ -34,6 +34,7 @@ JUPITER_SWAP_API = "https://api.jup.ag/swap/v1/swap"
 # Token Mint Addresses
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 # Safety Defaults (Clamped to safe ranges)
 try:

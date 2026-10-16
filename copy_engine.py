@@ -16,6 +16,7 @@ from config import (
     DEFAULT_SLIPPAGE_BPS,
     SOL_MINT,
     USDT_MINT,
+    USDC_MINT,
     FEE_RESERVE_SOL,
 )
 from wallet_manager import WalletManager
@@ -182,10 +183,11 @@ class CopyTradingEngine:
                 if mint:
                     post_map[mint] = ui_amt
 
-        # Check all unique mints (excluding base SOL and USDT to avoid stablecoin copy buys)
+        # Check all unique mints (excluding base SOL, USDT, and USDC to avoid stablecoin copy buys)
         all_mints = set(pre_map.keys()) | set(post_map.keys())
         all_mints.discard(SOL_MINT)
         all_mints.discard(USDT_MINT)
+        all_mints.discard(USDC_MINT)
 
         for mint in all_mints:
             pre_amt = pre_map.get(mint, 0.0)
@@ -345,19 +347,21 @@ class CopyTradingEngine:
                 keypair, mint, percentage=sell_pct, slippage_bps=slippage
             )
             if success:
-                try:
-                    u_settings = SettingsManager.get_user_settings(user_id)
-                    e_prices = u_settings.get("entry_prices", {})
-                    if mint in e_prices:
-                        del e_prices[mint]
-                        SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
-                except Exception as e:
-                    print(f"Failed to clear entry price on copy sell for user {user_id}: {e}")
+                if sell_pct >= 99.0:
+                    try:
+                        u_settings = SettingsManager.get_user_settings(user_id)
+                        e_prices = u_settings.get("entry_prices", {})
+                        if mint in e_prices:
+                            del e_prices[mint]
+                            SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
+                    except Exception as e:
+                        print(f"Failed to clear entry price on copy sell for user {user_id}: {e}")
 
             return {
                 "success": success,
                 "action": "SELL",
                 "mint": mint,
+                "sell_pct": sell_pct,
                 "sig": sig_or_err if success else "",
                 "error": sig_or_err if not success else "",
             }

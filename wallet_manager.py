@@ -478,7 +478,10 @@ class WalletManager:
             bh_data = bh_res.json()
             if "error" in bh_data:
                 return False, bh_data["error"].get("message", "Failed to fetch blockhash")
-            recent_blockhash_str = bh_data["result"]["value"]["blockhash"]
+            res_val = bh_data.get("result", {}).get("value")
+            if not res_val or not res_val.get("blockhash"):
+                return False, "Failed to retrieve valid blockhash from Solana RPC"
+            recent_blockhash_str = res_val["blockhash"]
             recent_blockhash = Hash.from_string(recent_blockhash_str)
 
             # Create transfer instruction
