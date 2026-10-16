@@ -96,16 +96,154 @@ python3 bot.py
 
 ---
 
+## 🤖 Multi-Agent AI Orchestrator Integration
+
+`msniffer` provides an automated listener and execution interface designed to receive and execute trade consensus signals emitted by your **Multi-Agent AI Telegram Group Chat Orchestrator**.
+
+When your AI agents debate market conditions, reach a voting consensus, and emit a buy/sell signal, `msniffer` automatically validates the payload, routes the swap through Jupiter Aggregator on Solana, and reports confirmation feedback back into the group chat.
+
+```mermaid
+flowchart LR
+    A["Multi-Agent Group Chat<br/>(AI Agents & Consensus)"] -->|"Telegram Message / Command<br/>or Local HTTP Webhook"| B["msniffer Receiver<br/>(Auth & Security Gate)"]
+    B -->|"Validated Signal"| C["Jupiter Swap Engine<br/>(MEV-Protected Routing)"]
+    C -->|"Confirmed TX Hash"| D["Solana Mainnet"]
+    D -->|"Execution Feedback"| A
+```
+
+### 1. Security & Whitelisting Configuration
+
+Configure the following environment variables in `.env` to restrict execution exclusively to your authorized group chat and orchestrator bots:
+
+```env
+# Designated Telegram Group Chat ID where your AI bots deliberate (e.g. -1001234567890)
+ORCHESTRATOR_CHAT_ID=-1001234567890
+
+# Optional: Comma-separated Telegram User or Bot IDs allowed to trigger automated trades
+ORCHESTRATOR_USER_IDS=8258083585,123456789
+
+# Optional: Shared Secret Key for payload validation or HTTP webhook header
+ORCHESTRATOR_SECRET=your_secret_consensus_token
+
+# Optional: Local HTTP Webhook endpoint (default: http://127.0.0.1:8088)
+ORCHESTRATOR_HTTP_ENABLED=true
+ORCHESTRATOR_HTTP_PORT=8088
+ORCHESTRATOR_HTTP_HOST=127.0.0.1
+```
+
+* **Security Gate:** Signals from unauthorized senders or outside the whitelisted group chat are strictly rejected with an audit alert.
+
+---
+
+### 2. Supported Signal Formats
+
+#### Option A: Structured JSON Payload (Recommended for Multi-Agent Consensus)
+The orchestrator bot can send a command (e.g. `/signal <json>`, `/execute <json>`) or post a JSON block directly into the designated group chat:
+
+```json
+{
+  "action": "BUY",
+  "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+  "amount": 0.2,
+  "symbol": "POPCAT",
+  "slippage_bps": 300,
+  "reason": "Consensus: 4/5 agents voted BUY due to 10x volume spike on Raydium.",
+  "secret": "your_secret_consensus_token"
+}
+```
+
+**SELL Example:**
+```json
+{
+  "action": "SELL",
+  "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+  "amount": 100.0,
+  "symbol": "POPCAT",
+  "reason": "Take-profit threshold reached. Consensus: 5/5 exit."
+}
+```
+
+#### Field Specifications:
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `action` | String | **Yes** | `"BUY"` or `"SELL"` |
+| `mint` | String | **Yes** | Valid Solana Token Contract Address (Base58) |
+| `amount` | Float | **Yes** | Amount in **SOL** (for BUY, max 1,000) or **Percentage** (for SELL, `0.1` - `100.0`) |
+| `symbol` | String | *Optional* | Token ticker (e.g., `POPCAT`, `BONK`) |
+| `slippage_bps`| Integer| *Optional* | Slippage tolerance in basis points (`10` to `1500`, default `300` = 3.0%) |
+| `reason` | String | *Optional* | Explanation or vote tally posted back into chat feedback |
+| `secret` | String | *Optional* | Shared secret if `ORCHESTRATOR_SECRET` is configured |
+
+---
+
+#### Option B: Compact Command Syntax
+Ideal for simple bot-to-bot commands in Telegram:
+```text
+/signal BUY 7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr 0.25 [slippage_bps]
+/signal SELL 7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr 50% [slippage_bps]
+/execute BUY 7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr 0.1
+!SIGNAL BUY 7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr 0.2
+[AGENT_SIGNAL] ACTION=BUY MINT=7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr AMOUNT=0.2
+```
+
+---
+
+### 3. Local HTTP Webhook Endpoint (Optional)
+
+If your Multi-Agent Orchestrator runs locally on the same server or over a local private network, it can dispatch trades directly via HTTP POST:
+
+```bash
+# Execute Buy Order
+curl -X POST http://127.0.0.1:8088/trade \
+  -H "Content-Type: application/json" \
+  -H "X-Orchestrator-Secret: your_secret_consensus_token" \
+  -d '{
+    "action": "BUY",
+    "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+    "amount": 0.2,
+    "symbol": "POPCAT"
+  }'
+```
+
+**JSON Response:**
+```json
+{
+  "success": true,
+  "action": "BUY",
+  "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+  "amount": 0.2,
+  "symbol": "POPCAT",
+  "tx_hash": "5KqX...solana_tx_hash...",
+  "solscan_url": "https://solscan.io/tx/5KqX...",
+  "duration_seconds": 1.42
+}
+```
+
+And `msniffer` will simultaneously broadcast the execution confirmation directly into your Telegram group chat!
+
+---
+
+### 4. Group Chat Execution Feedback
+
+Immediately upon receiving a signal, `msniffer`:
+1. Posts an instant acknowledgement (`🤖 AI Orchestrator Signal Received! Routing swap...`).
+2. Checks wallet balance and gas fee reserves (`0.005 SOL`).
+3. Acquires atomic lock (`UserTradeLock`) to prevent race conditions.
+4. Executes the swap via Jupiter Aggregator with priority compute units.
+5. Updates the message with live execution speed (`1.42s`), direct Solscan link, received token units, and 1-tap manual exit buttons (`🔴 Sell 50%`, `🔴 Sell 100%`, `🎒 Positions`, `🔎 Resniff`).
+
+---
+
 ## 📦 Project Structure
 
 ```
-├── bot.py              # Telegram bot UI, command handlers, and background trader loop
-├── sniffer.py          # DexScreener market analytics, trending scanner & RugCheck auditor
-├── ai_engine.py        # Algorithmic pattern recognition & pluggable LLM auto-trader
-├── copy_engine.py      # On-chain target wallet swap parser & mirrored execution engine
-├── wallet_manager.py   # AES-256 encrypted keystore, wallet import, transfers, and export
-├── jupiter_swap.py     # Jupiter Aggregator v1 swap quotes, fee routing & transaction signing
-├── config.py           # Environment variables, token constants, and storage paths
-├── requirements.txt    # Python dependencies
-└── start.sh            # Service launcher script
+├── bot.py                   # Telegram bot UI, command handlers, and background trader loop
+├── orchestrator_receiver.py # Multi-Agent AI Orchestrator receiver, parser, security & HTTP webhook
+├── sniffer.py               # DexScreener market analytics, trending scanner & RugCheck auditor
+├── ai_engine.py             # Algorithmic pattern recognition & pluggable LLM auto-trader
+├── copy_engine.py           # On-chain target wallet swap parser & mirrored execution engine
+├── wallet_manager.py        # AES-256 encrypted keystore, wallet import, transfers, and export
+├── jupiter_swap.py          # Jupiter Aggregator v1 swap quotes, fee routing & transaction signing
+├── config.py                # Environment variables, token constants, and storage paths
+├── requirements.txt         # Python dependencies
+└── start.sh                 # Service launcher script
 ```

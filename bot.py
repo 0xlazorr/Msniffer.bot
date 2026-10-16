@@ -37,6 +37,12 @@ from sniffer import MarketSniffer, format_currency
 from jupiter_swap import JupiterSwapEngine
 from copy_engine import SettingsManager, CopyTradingEngine
 from ai_engine import AITradingEngine
+from orchestrator_receiver import (
+    orchestrator_command_handler,
+    try_process_group_signal,
+    start_orchestrator_http_server,
+    stop_orchestrator_http_server,
+)
 
 # Logging configuration
 logging.basicConfig(
@@ -444,8 +450,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /copy — Set up & manage on-chain Copy Trading\n"
         "• /ai — Configure Autonomous AI Autopilot & TP/SL\n"
         "• /import — Connect an existing Phantom/Solflare wallet\n"
+        "• /signal — Execute AI Multi-Agent consensus trade signal\n"
+        "• /execute — Alias for /signal (JSON or compact format)\n"
         "• /cancel — Cancel any active input prompt\n"
         "• /help — Show this help manual\n\n"
+        "<b>Multi-Agent AI Orchestrator Integration:</b>\n"
+        "Post consensus signals to your designated group chat or use:\n"
+        "<code>/signal BUY &lt;mint&gt; &lt;amount_sol&gt; [slippage_bps]</code>\n"
+        "or send JSON: <code>{\"action\": \"BUY\", \"mint\": \"...\", \"amount\": 0.2}</code>\n\n"
         "<b>How to Sniff & Trade any Token:</b>\n"
         "Simply paste any Solana Contract Address (CA), DexScreener URL, or Pump.fun link directly into this chat. "
         "The bot will immediately analyze liquidity, honeypot safety, mint/freeze authorities, and provide 1-tap instant buy/sell buttons!\n\n"
@@ -600,9 +612,13 @@ async def alpha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MESSAGE & TEXT HANDLER
 # ----------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes incoming text: Solana CAs, cancel commands, or pending state inputs"""
+    """Processes incoming text: Solana CAs, cancel commands, pending state inputs, or AI signals"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
+
+    # 0. Intercept Multi-Agent AI Orchestrator group chat consensus signals
+    if await try_process_group_signal(update, context):
+        return
 
     # 1. Handle explicit cancel
     if text.lower() in ("/cancel", "cancel", "stop", "exit"):
@@ -1896,11 +1912,14 @@ async def post_init(application: Application):
     me = application.bot
     print(f"✅ Market Sniffer Bot is live! Logged in as: {me.first_name} (@{me.username})")
     BACKGROUND_WORKER_TASK = asyncio.create_task(supervised_background_worker(application))
+    # Start the Multi-Agent AI Orchestrator HTTP Webhook server (if enabled)
+    await start_orchestrator_http_server(application)
 
 
 async def post_shutdown(application: Application):
     """Cleanly cancels and awaits background tasks on shutdown"""
     global BACKGROUND_WORKER_TASK
+    await stop_orchestrator_http_server()
     if BACKGROUND_WORKER_TASK and not BACKGROUND_WORKER_TASK.done():
         BACKGROUND_WORKER_TASK.cancel()
         try:
@@ -1946,6 +1965,12 @@ def main():
     app.add_handler(CommandHandler("import", import_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("alpha", alpha_command))
+
+    # Multi-Agent AI Orchestrator Trigger Command Handlers
+    app.add_handler(CommandHandler("signal", orchestrator_command_handler))
+    app.add_handler(CommandHandler("execute", orchestrator_command_handler))
+    app.add_handler(CommandHandler("trade", orchestrator_command_handler))
+    app.add_handler(CommandHandler("agent_trade", orchestrator_command_handler))
 
     # Text message handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

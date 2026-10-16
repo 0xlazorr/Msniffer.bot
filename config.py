@@ -63,3 +63,31 @@ KEYSTORE_PATH = DATA_DIR / "wallets.enc"
 MASTER_KEY_PATH = DATA_DIR / "master.key"
 ALPHA_WALLET_PATH = DATA_DIR / "alpha_wallet.enc"
 SETTINGS_PATH = DATA_DIR / "trader_settings.enc"
+
+# Multi-Agent AI Orchestrator Integration
+try:
+    ORCHESTRATOR_CHAT_ID = int(os.getenv("ORCHESTRATOR_CHAT_ID", "0"))
+except ValueError:
+    ORCHESTRATOR_CHAT_ID = 0
+
+_raw_orch_users = os.getenv("ORCHESTRATOR_USER_IDS", "").strip()
+ORCHESTRATOR_USER_IDS: set[int] = set()
+if _raw_orch_users:
+    for _uid in _raw_orch_users.split(","):
+        _uid = _uid.strip()
+        if _uid.lstrip("-").isdigit():
+            ORCHESTRATOR_USER_IDS.add(int(_uid))
+
+ORCHESTRATOR_SECRET = os.getenv("ORCHESTRATOR_SECRET", "").strip()
+
+try:
+    ORCHESTRATOR_EXECUTION_USER_ID = int(os.getenv("ORCHESTRATOR_EXECUTION_USER_ID", str(ADMIN_USER_ID)))
+except ValueError:
+    ORCHESTRATOR_EXECUTION_USER_ID = ADMIN_USER_ID
+
+ORCHESTRATOR_HTTP_ENABLED = os.getenv("ORCHESTRATOR_HTTP_ENABLED", "true").lower() in ("true", "1", "yes")
+try:
+    ORCHESTRATOR_HTTP_PORT = int(os.getenv("ORCHESTRATOR_HTTP_PORT", "8088"))
+except ValueError:
+    ORCHESTRATOR_HTTP_PORT = 8088
+ORCHESTRATOR_HTTP_HOST = os.getenv("ORCHESTRATOR_HTTP_HOST", "127.0.0.1").strip()
