@@ -119,7 +119,7 @@ Configure the following environment variables in `.env` to restrict execution ex
 ORCHESTRATOR_CHAT_ID=-1001234567890
 
 # Optional: Comma-separated Telegram User or Bot IDs allowed to trigger automated trades
-ORCHESTRATOR_USER_IDS=8258083585,123456789
+ORCHESTRATOR_USER_IDS=123456789,987654321
 
 # Optional: Shared Secret Key for payload validation or HTTP webhook header
 ORCHESTRATOR_SECRET=your_secret_consensus_token
@@ -230,6 +230,64 @@ Immediately upon receiving a signal, `msniffer`:
 3. Acquires atomic lock (`UserTradeLock`) to prevent race conditions.
 4. Executes the swap via Jupiter Aggregator with priority compute units.
 5. Updates the message with live execution speed (`1.42s`), direct Solscan link, received token units, and 1-tap manual exit buttons (`🔴 Sell 50%`, `🔴 Sell 100%`, `🎒 Positions`, `🔎 Resniff`).
+
+---
+
+### 5. Telegram Group Chat Setup & BotFather Permissions
+
+To ensure `msniffer` can monitor consensus messages in your Telegram Group Chat:
+
+1. **Add Bot to Group:** Add your bot (`@Msnifferbot`) to your multi-agent trading group chat.
+2. **BotFather Privacy Setting:**
+   - Open Telegram and message `@BotFather`.
+   - Send `/setprivacy`.
+   - Select your bot (`@Msnifferbot`).
+   - Choose **Disable** (this allows the bot to receive and parse non-slash consensus JSON signals directly in the group).
+   - *Note:* If privacy mode is kept enabled, you can still trigger trades by using slash commands (`/signal`, `/execute`) or tagging the bot (`@Msnifferbot`).
+3. **Admin Rights (Recommended):** Grant the bot Admin permissions (specifically `Delete Messages` and `Send Messages`) so it can delete any sensitive user inputs and manage alerts cleanly.
+
+---
+
+## 🛠️ Production Process & Service Management
+
+Your server includes the custom `bots` CLI tool for resource management and systemd daemon control:
+
+```bash
+# Check status, memory usage, and PID of all bots
+bots status
+
+# Start Market Sniffer
+bots start sniffer
+
+# Stop Market Sniffer to free RAM and CPU resources
+bots stop sniffer
+
+# Restart Market Sniffer
+bots restart sniffer
+
+# View live real-time output and transaction logs
+bots logs sniffer
+
+# Manage all bots at once (Muzziko + Market Sniffer)
+bots start all
+bots stop all
+```
+
+---
+
+## ❓ Troubleshooting & FAQ
+
+#### Q: "Insufficient SOL Balance (Need 0.005 SOL fee reserve)"
+**A:** `msniffer` protects your wallet from getting stuck without gas by reserving a minimum floor of `0.005 SOL`. Deposit a small amount of native SOL to your bot deposit address (`/wallet`) to cover swap fees and rent exemption.
+
+#### Q: "Could not find a swap route or liquidity pool"
+**A:** This occurs if a newly launched meme coin has zero Raydium or Orca liquidity, or if Jupiter Aggregator hasn't indexed the pool yet. Try resniffing the token after 1-2 minutes.
+
+#### Q: "Trade in progress: Please wait for previous transaction"
+**A:** `msniffer` uses atomic locking (`UserTradeLock`) per wallet to prevent race conditions, nonce collisions, or accidental duplicate buy orders while a transaction is confirming on Solana.
+
+#### Q: "Unauthorized sender" when orchestrator triggers a trade
+**A:** Verify that your `.env` contains the correct `ORCHESTRATOR_CHAT_ID` (negative number for Telegram supergroups, e.g. `-1001234567890`) or that your signal includes `"secret": "..."` matching `ORCHESTRATOR_SECRET`.
 
 ---
 
