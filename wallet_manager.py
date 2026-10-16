@@ -1,9 +1,12 @@
 import os
 import json
 import time
+import fcntl
+import shutil
 import base58
 import base64
 import requests
+import threading
 from typing import Optional, Dict, Tuple, List, Any
 from cryptography.fernet import Fernet
 from solders.keypair import Keypair
@@ -20,28 +23,36 @@ from config import (
     RPC_ENDPOINT,
     USDT_MINT,
     FEE_PERCENT,
+    FEE_RESERVE_SOL,
 )
+
+
+class KeystoreCorruptedError(Exception):
+    """Raised when keystore file exists but cannot be decrypted or parsed."""
+    pass
 
 
 class WalletManager:
     _cipher: Optional[Fernet] = None
+    _lock: threading.Lock = threading.Lock()
 
     @classmethod
     def _get_cipher(cls) -> Fernet:
         """Initializes or retrieves the AES Fernet cipher using master key"""
-        if cls._cipher is None:
-            if not MASTER_KEY_PATH.exists():
-                key = Fernet.generate_key()
-                MASTER_KEY_PATH.write_bytes(key)
-                MASTER_KEY_PATH.chmod(0o600)
-            else:
-                key = MASTER_KEY_PATH.read_bytes()
-            cls._cipher = Fernet(key)
-        return cls._cipher
+        with cls._lock:
+            if cls._cipher is None:
+                if not MASTER_KEY_PATH.exists():
+                    key = Fernet.generate_key()
+                    MASTER_KEY_PATH.write_bytes(key)
+                    MASTER_KEY_PATH.chmod(0o600)
+                else:
+                    key = MASTER_KEY_PATH.read_bytes()
+                cls._cipher = Fernet(key)
+            return cls._cipher
 
     @classmethod
     def _load_keystore(cls) -> Dict[str, dict]:
-        """Loads and decrypts user keystore JSON"""
+        """Loads and decrypts user keystore JSON with corruption safeguards"""
         if not KEYSTORE_PATH.exists():
             return {}
         try:
@@ -52,17 +63,45 @@ class WalletManager:
             dec_data = cipher.decrypt(enc_data)
             return json.loads(dec_data.decode("utf-8"))
         except Exception as e:
-            print(f"Error loading keystore: {e}")
-            return {}
+            backup_corrupt = KEYSTORE_PATH.with_suffix(f".corrupt_{int(time.time())}.bak")
+            try:
+                shutil.copy2(KEYSTORE_PATH, backup_corrupt)
+                print(f"CRITICAL: Keystore decrypt error: {e}. Preserved backup at {backup_corrupt}")
+            except Exception:
+                pass
+            raise KeystoreCorruptedError(
+                f"Failed to load keystore! Existing data preserved to prevent overwriting: {e}"
+            )
 
     @classmethod
     def _save_keystore(cls, data: Dict[str, dict]):
-        """Encrypts and persists user keystore JSON to disk with 0600 permissions"""
-        cipher = cls._get_cipher()
-        raw_json = json.dumps(data).encode("utf-8")
-        enc_data = cipher.encrypt(raw_json)
-        KEYSTORE_PATH.write_bytes(enc_data)
-        KEYSTORE_PATH.chmod(0o600)
+        """Encrypts and persists user keystore JSON to disk atomically with file locking and backup"""
+        with cls._lock:
+            cipher = cls._get_cipher()
+            raw_json = json.dumps(data, indent=2).encode("utf-8")
+            enc_data = cipher.encrypt(raw_json)
+
+            # Always maintain a previous backup before overwriting
+            if KEYSTORE_PATH.exists():
+                try:
+                    shutil.copy2(KEYSTORE_PATH, KEYSTORE_PATH.with_suffix(".bak"))
+                except Exception:
+                    pass
+
+            # Write atomically using tempfile and os.replace
+            temp_path = KEYSTORE_PATH.with_suffix(".tmp")
+            with open(temp_path, "wb") as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    f.write(enc_data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+            temp_path.chmod(0o600)
+            os.replace(temp_path, KEYSTORE_PATH)
+            KEYSTORE_PATH.chmod(0o600)
 
     # ----------------------------------------------------
     # ALPHA WALLET (Exclusive Admin / Fee Collector Wallet)
@@ -80,20 +119,28 @@ class WalletManager:
                 dec = cipher.decrypt(enc)
                 return json.loads(dec.decode("utf-8"))
             except Exception as e:
-                print(f"Error reading Alpha wallet: {e}")
+                # Fatal protection: Never overwrite an unreadable alpha wallet
+                print(f"CRITICAL: Failed to read Alpha wallet: {e}")
+                raise RuntimeError(
+                    f"Alpha wallet exists but could not be decrypted. Aborting to protect collected fees: {e}"
+                )
 
         # Generate fresh permanent Alpha Wallet
-        kp = Keypair()
-        pubkey_str = str(kp.pubkey())
-        priv_b58 = base58.b58encode(bytes(kp)).decode("utf-8")
-        data = {
-            "public_key": pubkey_str,
-            "private_key_b58": priv_b58,
-        }
-        enc = cipher.encrypt(json.dumps(data).encode("utf-8"))
-        ALPHA_WALLET_PATH.write_bytes(enc)
-        ALPHA_WALLET_PATH.chmod(0o600)
-        return data
+        with cls._lock:
+            kp = Keypair()
+            pubkey_str = str(kp.pubkey())
+            priv_b58 = base58.b58encode(bytes(kp)).decode("utf-8")
+            data = {
+                "public_key": pubkey_str,
+                "private_key_b58": priv_b58,
+            }
+            enc = cipher.encrypt(json.dumps(data).encode("utf-8"))
+            temp_alpha = ALPHA_WALLET_PATH.with_suffix(".tmp")
+            temp_alpha.write_bytes(enc)
+            temp_alpha.chmod(0o600)
+            os.replace(temp_alpha, ALPHA_WALLET_PATH)
+            ALPHA_WALLET_PATH.chmod(0o600)
+            return data
 
     @classmethod
     def get_alpha_public_key(cls) -> str:
@@ -107,6 +154,7 @@ class WalletManager:
         data = cls.get_or_create_alpha_wallet()
         priv_bytes = base58.b58decode(data["private_key_b58"])
         return Keypair.from_bytes(priv_bytes)
+
 
     # ----------------------------------------------------
     # USER TRADING WALLETS
@@ -141,9 +189,16 @@ class WalletManager:
         Returns (success, public_key_or_empty, status_message).
         """
         raw_input = private_key_str.strip().replace('"', '').replace("'", "")
+        if len(raw_input) > 1024:
+            return False, "", "Key input exceeds maximum allowed length (1024 chars)."
+
         try:
             if raw_input.startswith("[") and raw_input.endswith("]"):
                 byte_list = json.loads(raw_input)
+                if not isinstance(byte_list, list) or len(byte_list) not in (32, 64):
+                    return False, "", "JSON array must contain exactly 32 or 64 byte integers."
+                if not all(isinstance(x, int) and 0 <= x <= 255 for x in byte_list):
+                    return False, "", "All items in JSON array must be integers between 0 and 255."
                 key_bytes = bytes(byte_list)
             else:
                 key_bytes = base58.b58decode(raw_input)
@@ -160,6 +215,13 @@ class WalletManager:
 
             keystore = cls._load_keystore()
             uid = str(user_id)
+            # Backup previous key in history if user was replacing
+            if uid in keystore:
+                hist_key = f"{uid}_history"
+                hist = keystore.get(hist_key, [])
+                hist.append(keystore[uid])
+                keystore[hist_key] = hist[-5:]  # Keep last 5 historical keys
+
             keystore[uid] = {
                 "public_key": pubkey_str,
                 "private_key_b58": priv_b58,
@@ -199,9 +261,16 @@ class WalletManager:
 
     @classmethod
     def reset_wallet(cls, user_id: int) -> str:
-        """Generates a brand new wallet for user and returns the new public address"""
+        """Generates a brand new wallet for user and preserves the old one in history"""
         keystore = cls._load_keystore()
         uid = str(user_id)
+
+        # Preserve existing wallet in history so funds are never permanently lost
+        if uid in keystore:
+            hist_key = f"{uid}_history"
+            hist = keystore.get(hist_key, [])
+            hist.append(keystore[uid])
+            keystore[hist_key] = hist[-5:]
 
         kp = Keypair()
         pubkey_str = str(kp.pubkey())
@@ -220,16 +289,23 @@ class WalletManager:
     @classmethod
     def get_sol_balance(cls, public_key: str) -> float:
         """Fetches live SOL balance via Solana JSON-RPC"""
+        if not public_key:
+            return 0.0
         try:
+            # Validate address format before making RPC call
+            Pubkey.from_string(public_key.strip())
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getBalance",
-                "params": [public_key, {"commitment": "confirmed"}],
+                "params": [public_key.strip(), {"commitment": "confirmed"}],
             }
             res = requests.post(RPC_ENDPOINT, json=payload, timeout=8)
             if res.status_code == 200:
                 data = res.json()
+                if "error" in data:
+                    print(f"RPC getBalance error for {public_key}: {data['error']}")
+                    return 0.0
                 lamports = data.get("result", {}).get("value", 0)
                 return lamports / 1_000_000_000.0
         except Exception as e:
@@ -239,6 +315,8 @@ class WalletManager:
     @classmethod
     def get_usdt_balance(cls, public_key: str) -> float:
         """Fetches live USDT balance in user's wallet"""
+        if not public_key:
+            return 0.0
         ui_amount, _ = cls.get_token_balance(public_key, USDT_MINT)
         return ui_amount
 
@@ -249,14 +327,18 @@ class WalletManager:
         Sums across all token accounts to handle multiple accounts correctly.
         Returns (ui_amount, raw_amount).
         """
+        if not wallet_pubkey or not token_mint:
+            return 0.0, 0
         try:
+            Pubkey.from_string(wallet_pubkey.strip())
+            Pubkey.from_string(token_mint.strip())
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getTokenAccountsByOwner",
                 "params": [
-                    wallet_pubkey,
-                    {"mint": token_mint},
+                    wallet_pubkey.strip(),
+                    {"mint": token_mint.strip()},
                     {"encoding": "jsonParsed"},
                 ],
             }
@@ -280,6 +362,8 @@ class WalletManager:
         Queries all token positions for the wallet across both SPL Token and Token-2022 programs.
         Returns list of non-zero positions: [{"mint": str, "ui_amount": float, "raw_amount": int, "decimals": int}].
         """
+        if not wallet_pubkey:
+            return []
         programs = [
             "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token Program
             "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022 Program
@@ -293,7 +377,7 @@ class WalletManager:
                     "id": 1,
                     "method": "getTokenAccountsByOwner",
                     "params": [
-                        wallet_pubkey,
+                        wallet_pubkey.strip(),
                         {"programId": prog_id},
                         {"encoding": "jsonParsed"},
                     ],
@@ -375,11 +459,11 @@ class WalletManager:
         wait_confirmation: bool = True,
     ) -> Tuple[bool, str]:
         """
-        Transfers SOL from sender to recipient address on-chain.
+        Transfers SOL from sender to recipient address on-chain with exact rounding.
         """
         try:
             recipient_pubkey = Pubkey.from_string(recipient_address.strip())
-            lamports = int(amount_sol * 1_000_000_000)
+            lamports = round(amount_sol * 1_000_000_000)
             if lamports <= 0:
                 return False, "Transfer amount must be positive"
 
@@ -434,8 +518,7 @@ class WalletManager:
     @classmethod
     def route_gas_fee(cls, sender_keypair: Keypair, fee_sol: float):
         """
-        Routes the gas fee directly into the Alpha Wallet silently.
-        Includes overdraft protection so gas buffer is never violated.
+        Routes the fee directly into the Alpha Wallet silently with reserve buffer protection.
         """
         if fee_sol <= 0:
             return
@@ -447,10 +530,13 @@ class WalletManager:
                 return
 
             current_bal = cls.get_sol_balance(sender_pub)
-            # Ensure at least 0.001 SOL buffer remains in user wallet for rent & gas
-            max_sendable = max(0.0, current_bal - 0.001)
+            # Ensure safety buffer remains in user wallet for rent & gas
+            buffer_sol = max(0.002, FEE_RESERVE_SOL)
+            max_sendable = max(0.0, current_bal - buffer_sol)
             actual_fee = min(fee_sol, max_sendable)
             if actual_fee >= 0.00005:
-                cls.transfer_sol(sender_keypair, alpha_pub, actual_fee, wait_confirmation=False)
+                success, res = cls.transfer_sol(sender_keypair, alpha_pub, actual_fee, wait_confirmation=False)
+                if not success:
+                    print(f"Fee route transfer notification: {res}")
         except Exception as e:
             print(f"Fee route silent exception: {e}")

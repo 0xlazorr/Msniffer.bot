@@ -5,6 +5,7 @@ from solders.pubkey import Pubkey
 
 DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/{}"
 RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{}/report"
+HEADERS = {"User-Agent": "MarketSnifferBot/2.0 (Solana Autonomous Trader)"}
 
 
 def format_currency(val: Optional[float], is_usd: bool = True) -> str:
@@ -28,6 +29,8 @@ class MarketSniffer:
     @staticmethod
     def is_valid_solana_address(address: str) -> bool:
         """Validates if a string is a valid Solana Base58 public key"""
+        if not address:
+            return False
         try:
             Pubkey.from_string(address.strip())
             return True
@@ -49,7 +52,7 @@ class MarketSniffer:
         except Exception:
             pass
 
-        tokens = re.findall(r"[1-9A-HJ-NP-Za-km-z]{32,44}", cleaned)
+        tokens = re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", cleaned)
         for tok in tokens:
             try:
                 Pubkey.from_string(tok)
@@ -61,11 +64,11 @@ class MarketSniffer:
     @staticmethod
     def get_market_data(mint: str) -> Optional[Dict[str, Any]]:
         """
-        Fetches live market metrics from DexScreener.
+        Fetches live market metrics from DexScreener strictly for Solana pairs.
         """
         try:
             url = DEXSCREENER_URL.format(mint.strip())
-            res = requests.get(url, timeout=8)
+            res = requests.get(url, headers=HEADERS, timeout=8)
             if res.status_code != 200:
                 return None
             data = res.json()
@@ -73,40 +76,43 @@ class MarketSniffer:
             if not pairs:
                 return None
 
-            # Pick the most liquid Solana pair (usually the first or highest liquidity)
+            # Pick the most liquid Solana pair (strictly require chainId == solana)
             best_pair = None
             highest_liq = -1.0
             for p in pairs:
                 if p.get("chainId") == "solana":
-                    liq_usd = float(p.get("liquidity", {}).get("usd", 0.0) or 0.0)
+                    liq_obj = p.get("liquidity") or {}
+                    liq_usd = float(liq_obj.get("usd", 0.0) or 0.0)
                     if liq_usd > highest_liq:
                         highest_liq = liq_usd
                         best_pair = p
 
+            # If no Solana pair exists, reject to avoid cross-chain confusion
             if not best_pair:
-                best_pair = pairs[0]
+                return None
 
-            base = best_pair.get("baseToken", {})
+            base = best_pair.get("baseToken") or {}
             name = base.get("name", "Unknown Token")
             symbol = base.get("symbol", "TOKEN")
             price_usd = float(best_pair.get("priceUsd") or 0.0)
             price_native = float(best_pair.get("priceNative") or 0.0)
             fdv = float(best_pair.get("fdv") or 0.0)
-            liq_usd = float(best_pair.get("liquidity", {}).get("usd") or 0.0)
+            liq_obj = best_pair.get("liquidity") or {}
+            liq_usd = float(liq_obj.get("usd") or 0.0)
 
             # Price changes
-            price_change = best_pair.get("priceChange", {})
+            price_change = best_pair.get("priceChange") or {}
             m5 = float(price_change.get("m5") or 0.0)
             h1 = float(price_change.get("h1") or 0.0)
             h24 = float(price_change.get("h24") or 0.0)
 
-            volume = best_pair.get("volume", {})
+            volume = best_pair.get("volume") or {}
             vol_24h = float(volume.get("h24") or 0.0)
             vol_h1 = float(volume.get("h1") or 0.0)
             vol_m5 = float(volume.get("m5") or 0.0)
 
-            txns = best_pair.get("txns", {})
-            m5_txns = txns.get("m5", {})
+            txns = best_pair.get("txns") or {}
+            m5_txns = txns.get("m5") or {}
             buys_m5 = int(m5_txns.get("buys") or 0)
             sells_m5 = int(m5_txns.get("sells") or 0)
 
@@ -147,7 +153,7 @@ class MarketSniffer:
         mints = []
         for url in endpoints:
             try:
-                res = requests.get(url, timeout=6)
+                res = requests.get(url, headers=HEADERS, timeout=6)
                 if res.status_code == 200:
                     data = res.json()
                     if isinstance(data, list):
@@ -175,15 +181,16 @@ class MarketSniffer:
             "lp_locked_pct": 0.0,
             "score": 0,
             "risk_level": "UNKNOWN",
+            "risk_tag": "UNKNOWN",  # Canonical tag: SAFE, CAUTION, DANGER, UNVERIFIED
             "warnings": [],
         }
 
         try:
             url = RUGCHECK_URL.format(mint.strip())
-            res = requests.get(url, timeout=8)
+            res = requests.get(url, headers=HEADERS, timeout=8)
             if res.status_code == 200:
                 data = res.json()
-                token_info = data.get("token", {})
+                token_info = data.get("token") or {}
 
                 # 1. Mint Authority
                 mint_auth = token_info.get("mintAuthority")
@@ -202,10 +209,16 @@ class MarketSniffer:
                     audit["warnings"].append("🚨 Freeze Authority is active (Owner can freeze your wallet!)")
 
                 # 3. Top Holders
-                top_holders = data.get("topHolders", [])
+                top_holders = data.get("topHolders") or []
                 if top_holders:
                     top10 = top_holders[:10]
-                    top10_sum = sum(float(h.get("pct") or 0.0) for h in top10)
+                    top10_sum = 0.0
+                    for h in top10:
+                        raw_pct = str(h.get("pct", 0.0)).replace("%", "").strip()
+                        try:
+                            top10_sum += float(raw_pct)
+                        except ValueError:
+                            pass
                     audit["top10_pct"] = top10_sum
                     if top10_sum > 50.0:
                         audit["warnings"].append(f"⚠️ Top 10 holders own {top10_sum:.1f}% (High dump risk)")
@@ -213,28 +226,33 @@ class MarketSniffer:
                 # 4. RugCheck Risk Score & Metadata
                 score = data.get("score", 0)
                 audit["score"] = score
-                audit["token_meta"] = data.get("tokenMeta", {})
+                audit["token_meta"] = data.get("tokenMeta") or {}
 
-                for r in data.get("risks", []):
+                for r in (data.get("risks") or []):
                     desc = r.get("description") or r.get("name")
                     if desc:
                         warn = f"⚠️ {desc}"
                         if warn not in audit["warnings"]:
                             audit["warnings"].append(warn)
 
-                # Determine overall risk rating
+                # Determine overall risk rating & canonical tag
                 if audit["freeze_authority"] == "ACTIVE" or audit["mint_authority"] == "ACTIVE":
                     audit["risk_level"] = "🚨 HIGH DANGER (HONEYPOT RISK)"
+                    audit["risk_tag"] = "DANGER"
                 elif score > 1000 or audit["top10_pct"] > 60:
                     audit["risk_level"] = "⚠️ CAUTION / RISKY"
+                    audit["risk_tag"] = "CAUTION"
                 else:
                     audit["risk_level"] = "🟢 LOW RISK (SAFE)"
+                    audit["risk_tag"] = "SAFE"
             else:
                 audit["risk_level"] = "⚠️ UNVERIFIED (RugCheck API Busy)"
+                audit["risk_tag"] = "UNVERIFIED"
                 audit["warnings"].append("⚠️ Security audit temporarily unavailable. Trade with caution!")
 
         except Exception as e:
             audit["risk_level"] = "⚠️ UNVERIFIED"
+            audit["risk_tag"] = "UNVERIFIED"
             audit["warnings"].append("⚠️ Could not reach security auditor. Verify CA manually before trading.")
 
         return audit
@@ -256,6 +274,10 @@ class MarketSniffer:
             "h1": 0.0,
             "h24": 0.0,
             "vol_24h": 0.0,
+            "vol_h1": 0.0,
+            "vol_m5": 0.0,
+            "buys_m5": 0,
+            "sells_m5": 0,
             "pair_url": f"https://dexscreener.com/solana/{mint}",
             "dex": "DEX",
         }
@@ -273,11 +295,13 @@ class MarketSniffer:
         liq = market.get("liquidity_usd", 0.0)
         if 0.0 < liq < 5000.0:
             security["warnings"].append(f"⚠️ Low Liquidity (${liq:,.0f}). Severe price impact possible.")
-            if security["risk_level"] == "🟢 LOW RISK (SAFE)":
+            if security["risk_tag"] == "SAFE":
                 security["risk_level"] = "⚠️ LOW LIQUIDITY RISK"
-        elif liq == 0.0 and not security.get("token_meta"):
+                security["risk_tag"] = "CAUTION"
+        elif liq == 0.0:
             security["warnings"].append("🚨 Zero Liquidity detected! Swaps may fail.")
             security["risk_level"] = "🚨 ZERO LIQUIDITY"
+            security["risk_tag"] = "DANGER"
 
         if "pump" in market.get("dex", "").lower():
             security["warnings"].append("🟢 Pump.fun Curve: Mint & Freeze disabled by program.")

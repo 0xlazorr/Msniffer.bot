@@ -1,5 +1,7 @@
 # Financial secrets & keystores
 data/
+backups/
+*.bak
 *.enc
 *.key
 .env

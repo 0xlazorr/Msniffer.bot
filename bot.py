@@ -51,6 +51,26 @@ USER_STATES: Dict[int, Dict[str, Any]] = {}
 # Active admin ID
 ACTIVE_ADMIN_ID = ADMIN_USER_ID
 
+USER_ACTIVE_TRADES: set[int] = set()
+
+
+class UserTradeLock:
+    """Async context manager to prevent concurrent/spam trade execution per user"""
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self.acquired = False
+
+    async def __aenter__(self):
+        if self.user_id in USER_ACTIVE_TRADES:
+            return False
+        USER_ACTIVE_TRADES.add(self.user_id)
+        self.acquired = True
+        return True
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.acquired:
+            USER_ACTIVE_TRADES.discard(self.user_id)
+
 
 def parse_positive_float(val: str, max_val: float = 1_000_000.0) -> Optional[float]:
     """Strictly parses positive floats, rejecting NaN, Inf, zero, negatives, and overflow"""
@@ -112,6 +132,8 @@ def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 def format_swap_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Builds the SOL <-> USDT quick swap interface"""
     pubkey = WalletManager.get_public_key(user_id)
+    if not pubkey:
+        pubkey, _ = WalletManager.get_or_create_wallet(user_id)
     sol_bal = WalletManager.get_sol_balance(pubkey)
     usdt_bal = WalletManager.get_usdt_balance(pubkey)
 
@@ -285,7 +307,10 @@ def format_positions_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
     ])
 
-    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+    full_text = "\n".join(lines)
+    if len(full_text) > 4000:
+        full_text = full_text[:3950] + "\n\n<i>[Positions list truncated...]</i>"
+    return full_text, InlineKeyboardMarkup(keyboard)
 
 
 def build_audit_markup(
@@ -326,41 +351,47 @@ def build_audit_markup(
 
 
 def format_audit_message(report: dict, sol_balance: float, token_balance: float = 0.0) -> str:
-    """Formats comprehensive market and safety audit card"""
-    mint = report["mint"]
-    market = report["market"]
-    sec = report["security"]
+    """Formats comprehensive market and safety audit card with 4000-character safety limit"""
+    mint = report.get("mint", "")
+    market = report.get("market") or {}
+    sec = report.get("security") or {}
 
-    name_esc = html.escape(market["name"])
-    symbol_esc = html.escape(market["symbol"])
+    name_esc = html.escape(str(market.get("name", "Unknown Token")))
+    symbol_esc = html.escape(str(market.get("symbol", "TOKEN")))
 
     lines = [
         "🐕🔎 <b>MARKET SNIFFER AUDIT</b>\n",
         f"🪙 <b>{name_esc}</b> (<code>${symbol_esc}</code>)",
         f"📝 <code>{mint}</code>\n",
         "📊 <b>Market Metrics:</b>",
-        f"• <b>Price:</b> {format_currency(market['price_usd'])} ({market['price_native']:.8f} SOL)",
-        f"• <b>Market Cap:</b> {format_currency(market['fdv'])}",
-        f"• <b>Liquidity:</b> {format_currency(market['liquidity_usd'])} ({market['dex']})",
-        f"• <b>Changes:</b> 5m: <code>{market['m5']:+.1f}%</code> | 1h: <code>{market['h1']:+.1f}%</code> | 24h: <code>{market['h24']:+.1f}%</code>\n",
+        f"• <b>Price:</b> {format_currency(market.get('price_usd'))} ({market.get('price_native', 0.0):.8f} SOL)",
+        f"• <b>Market Cap:</b> {format_currency(market.get('fdv'))}",
+        f"• <b>Liquidity:</b> {format_currency(market.get('liquidity_usd'))} ({market.get('dex', 'DEX')})",
+        f"• <b>Changes:</b> 5m: <code>{market.get('m5', 0.0):+.1f}%</code> | 1h: <code>{market.get('h1', 0.0):+.1f}%</code> | 24h: <code>{market.get('h24', 0.0):+.1f}%</code>\n",
         "🛡️ <b>Security & Honeypot Sniffer:</b>",
-        f"• <b>Freeze Authority:</b> {'🟢 REVOKED (Safe)' if sec['freeze_authority'] == 'REVOKED' else '🚨 ACTIVE (DANGER: Can freeze wallet!)'}",
-        f"• <b>Mint Authority:</b> {'🟢 REVOKED (Safe)' if sec['mint_authority'] == 'REVOKED' else '🚨 ACTIVE (DANGER: Infinite mint!)'}",
-        f"• <b>Top 10 Concentration:</b> {sec['top10_pct']:.1f}%",
-        f"• <b>Safety Rating:</b> <b>{sec['risk_level']}</b>",
+        f"• <b>Freeze Authority:</b> {'🟢 REVOKED (Safe)' if sec.get('freeze_authority') == 'REVOKED' else '🚨 ACTIVE (DANGER: Can freeze wallet!)'}",
+        f"• <b>Mint Authority:</b> {'🟢 REVOKED (Safe)' if sec.get('mint_authority') == 'REVOKED' else '🚨 ACTIVE (DANGER: Infinite mint!)'}",
+        f"• <b>Top 10 Concentration:</b> {sec.get('top10_pct', 0.0):.1f}%",
+        f"• <b>Safety Rating:</b> <b>{sec.get('risk_level', 'UNKNOWN')}</b>",
     ]
 
-    if sec["warnings"]:
+    warnings = sec.get("warnings") or []
+    if warnings:
         lines.append("\n⚠️ <b>Detected Warnings:</b>")
-        for w in sec["warnings"]:
-            lines.append(f"• {html.escape(w)}")
+        for w in warnings[:6]:  # Limit to top 6 warnings to prevent message overflow
+            lines.append(f"• {html.escape(str(w))}")
+        if len(warnings) > 6:
+            lines.append(f"<i>...and {len(warnings) - 6} more warnings</i>")
 
     lines.append(f"\n💳 <b>Your SOL Balance:</b> <code>{sol_balance:.4f} SOL</code>")
     if token_balance > 0:
         lines.append(f"🎒 <b>You Own:</b> <code>{token_balance:,.2f} ${symbol_esc}</code>")
 
     lines.append("\n<i>Tap a button below to execute instant swap:</i>")
-    return "\n".join(lines)
+    msg_str = "\n".join(lines)
+    if len(msg_str) > 4000:
+        msg_str = msg_str[:3950] + "\n\n<i>[Audit report truncated for length...]</i>"
+    return msg_str
 
 
 # ----------------------------------------------------
@@ -491,22 +522,14 @@ async def alpha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    # Auto-claim admin role on first call if ADMIN_USER_ID is not configured
+    # Require ADMIN_USER_ID to be explicitly configured in .env
     if ACTIVE_ADMIN_ID == 0:
-        ACTIVE_ADMIN_ID = user_id
-        try:
-            import re
-            from config import BASE_DIR
-            env_file = BASE_DIR / ".env"
-            if env_file.exists():
-                txt = env_file.read_text()
-                if "ADMIN_USER_ID=" in txt:
-                    txt = re.sub(r"ADMIN_USER_ID=\d+", f"ADMIN_USER_ID={user_id}", txt)
-                else:
-                    txt += f"\nADMIN_USER_ID={user_id}\n"
-                env_file.write_text(txt)
-        except Exception:
-            pass
+        await update.message.reply_text(
+            "⛔ <b>Alpha Treasury is locked.</b>\n\n"
+            "Please configure <code>ADMIN_USER_ID=&lt;your_telegram_id&gt;</code> in <code>.env</code> to activate.",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
     if user_id != ACTIVE_ADMIN_ID:
         # Silently ignore unauthorized users
@@ -565,11 +588,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. State machine (waiting for user inputs)
     if user_id in USER_STATES:
         state = USER_STATES[user_id]
-        state_type = state.get("type")
-
-        # If user was in a numeric prompt but pasted a new CA, discard prompt and sniff CA
-        if extracted_ca and state_type in ("custom_buy", "custom_sol_to_usdt", "custom_usdt_to_sol"):
+        # Prune state if older than 5 minutes (300 seconds)
+        if time.time() - state.get("_ts", time.time()) > 300.0:
             USER_STATES.pop(user_id, None)
+            state = None
+
+        if state:
+            state_type = state.get("type")
+
+            # If user was in a numeric prompt but pasted a new CA, discard prompt and sniff CA
+            if extracted_ca and state_type in ("custom_buy", "custom_sol_to_usdt", "custom_usdt_to_sol"):
+                USER_STATES.pop(user_id, None)
+                state = None
             # Will proceed to sniffing extracted_ca below
         elif state_type == "custom_buy":
             mint = state["mint"]
@@ -643,15 +673,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             alpha_data = WalletManager.get_or_create_alpha_wallet()
             balance = WalletManager.get_sol_balance(alpha_data["public_key"])
-            if balance <= FEE_RESERVE_SOL:
-                await update.message.reply_text(f"❌ Insufficient Alpha balance ({balance:.4f} SOL).")
+            max_sendable = max(0.0, balance - FEE_RESERVE_SOL)
+            if max_sendable <= 0.0001:
+                await update.message.reply_text(f"❌ Insufficient Alpha balance ({balance:.4f} SOL). Need reserve for gas.")
                 return
 
-            withdraw_amount = balance - FEE_RESERVE_SOL
+            withdraw_amount = max_sendable
             if len(parts) >= 2 and parts[1].lower() != "all":
-                amt_parsed = parse_positive_float(parts[1], max_val=balance)
-                if amt_parsed is not None:
+                amt_parsed = parse_positive_float(parts[1], max_val=max_sendable)
+                if amt_parsed is not None and amt_parsed <= max_sendable:
                     withdraw_amount = amt_parsed
+                else:
+                    await update.message.reply_text(f"❌ Requested amount exceeds maximum sendable ({max_sendable:.4f} SOL).")
+                    return
 
             kp = WalletManager.get_alpha_keypair()
             status_msg = await update.message.reply_text(f"⏳ <i>Sending {withdraw_amount:.4f} SOL from Alpha wallet...</i>", parse_mode=ParseMode.HTML)
@@ -692,27 +726,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Import Existing Wallet
         elif state_type == "import_wallet":
             del USER_STATES[user_id]
+            delete_failed = False
             try:
                 # Security: Delete raw private key message from chat immediately
                 await update.message.delete()
             except Exception:
-                pass
+                delete_failed = True
 
             success, pubkey_imported, msg = WalletManager.import_wallet(user_id, text)
             if success:
                 sol_bal = WalletManager.get_sol_balance(pubkey_imported)
                 usdt_bal = WalletManager.get_usdt_balance(pubkey_imported)
+                warning_notice = ""
+                if delete_failed:
+                    warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Could not automatically delete your message containing the private key. Please manually delete it from this chat immediately for security!</i>"
+                else:
+                    warning_notice = "\n\n🔒 <i>Your message containing the key was deleted automatically from this chat.</i>"
                 succ_text = (
                     "🎉 <b>WALLET IMPORTED SUCCESSFULLY!</b>\n\n"
                     "📬 <b>Connected Address:</b>\n"
                     f"<code>{pubkey_imported}</code> <i>(tap to copy)</i>\n\n"
                     f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n\n"
-                    "🔒 <i>Your private key is secured with AES-256 encryption. Your Telegram message containing the key was deleted automatically.</i>"
+                    f"🔒 <i>Your private key is secured with AES-256 encryption.</i>{warning_notice}"
                 )
                 _, markup = format_main_menu(user_id)
                 await update.effective_chat.send_message(succ_text, parse_mode=ParseMode.HTML, reply_markup=markup)
             else:
-                await update.effective_chat.send_message(f"❌ <b>Import Failed:</b> {html.escape(msg)}\n\nTry again via /import or type /cancel to abort.", parse_mode=ParseMode.HTML)
+                warning_notice = ""
+                if delete_failed:
+                    warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Please manually delete your message containing the private key immediately!</i>"
+                await update.effective_chat.send_message(f"❌ <b>Import Failed:</b> {html.escape(msg)}{warning_notice}\n\nTry again via /import or type /cancel to abort.", parse_mode=ParseMode.HTML)
             return
 
         # Set Target Wallet for Copy Trading
@@ -800,15 +843,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
 
-        report = MarketSniffer.sniff(mint)
-        pubkey, _ = WalletManager.get_or_create_wallet(user_id)
-        sol_bal = WalletManager.get_sol_balance(pubkey)
-        token_bal, _ = WalletManager.get_token_balance(pubkey, mint)
+        try:
+            report = MarketSniffer.sniff(mint)
+            pubkey, _ = WalletManager.get_or_create_wallet(user_id)
+            sol_bal = WalletManager.get_sol_balance(pubkey)
+            token_bal, _ = WalletManager.get_token_balance(pubkey, mint)
 
-        msg_text = format_audit_message(report, sol_bal, token_bal)
-        markup = build_audit_markup(mint, report["market"]["pair_url"], has_token_balance=(token_bal > 0))
+            msg_text = format_audit_message(report, sol_bal, token_bal)
+            pair_url = (report.get("market") or {}).get("pair_url", f"https://dexscreener.com/solana/{mint}")
+            markup = build_audit_markup(mint, pair_url, has_token_balance=(token_bal > 0))
 
-        await status_msg.edit_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+            await status_msg.edit_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Error sniffing token {mint}: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"❌ <b>Failed to sniff token:</b>\n<code>{mint}</code>\n\n"
+                f"<i>Error: {html.escape(str(e))}</i>\n"
+                "Please verify this is an active Solana token mint address and try again.",
+                parse_mode=ParseMode.HTML
+            )
         return
 
     # Fallback
@@ -828,83 +881,92 @@ async def execute_buy_action(
     callback_query = None
 ):
     """Executes a buy order via Jupiter Swap and reports transaction result"""
-    pubkey = WalletManager.get_public_key(user_id)
-    balance = WalletManager.get_sol_balance(pubkey)
+    async with UserTradeLock(user_id) as acquired:
+        if not acquired:
+            warn_msg = "⏳ <b>Trade in progress:</b> Please wait for your previous transaction to complete before placing another order."
+            if callback_query:
+                await callback_query.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
+            return
 
-    needed_sol = amount_sol + FEE_RESERVE_SOL
-    if balance < needed_sol:
-        err_msg = (
-            f"❌ <b>Insufficient SOL Balance!</b>\n\n"
-            f"You need at least <code>{needed_sol:.4f} SOL</code> (including network fee reserve).\n"
-            f"Current Balance: <code>{balance:.4f} SOL</code>\n\n"
-            f"Deposit SOL to: <code>{pubkey}</code>"
+        pubkey = WalletManager.get_public_key(user_id)
+        balance = WalletManager.get_sol_balance(pubkey)
+
+        needed_sol = amount_sol + FEE_RESERVE_SOL
+        if balance < needed_sol:
+            err_msg = (
+                f"❌ <b>Insufficient SOL Balance!</b>\n\n"
+                f"You need at least <code>{needed_sol:.4f} SOL</code> (including network fee reserve).\n"
+                f"Current Balance: <code>{balance:.4f} SOL</code>\n\n"
+                f"Deposit SOL to: <code>{pubkey}</code>"
+            )
+            if callback_query:
+                await callback_query.message.reply_text(err_msg, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(err_msg, parse_mode=ParseMode.HTML)
+            return
+
+        progress_text = (
+            f"⏳ <b>Executing Buy Order...</b>\n\n"
+            f"🪙 Token: <code>{mint}</code>\n"
+            f"💸 Amount: <code>{amount_sol:.4f} SOL</code>\n"
+            "🛡️ <i>Routing via Jupiter Aggregator with priority fee...</i>"
         )
+
         if callback_query:
-            await callback_query.message.reply_text(err_msg, parse_mode=ParseMode.HTML)
+            status_msg = await callback_query.message.reply_text(progress_text, parse_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text(err_msg, parse_mode=ParseMode.HTML)
-        return
+            status_msg = await update.message.reply_text(progress_text, parse_mode=ParseMode.HTML)
 
-    progress_text = (
-        f"⏳ <b>Executing Buy Order...</b>\n\n"
-        f"🪙 Token: <code>{mint}</code>\n"
-        f"💸 Amount: <code>{amount_sol} SOL</code>\n"
-        "🛡️ <i>Routing via Jupiter Aggregator with priority fee...</i>"
-    )
+        keypair = WalletManager.get_keypair(user_id)
+        if not keypair:
+            await status_msg.edit_text("❌ Error loading wallet keys. Please check /wallet.")
+            return
 
-    if callback_query:
-        status_msg = await callback_query.message.reply_text(progress_text, parse_mode=ParseMode.HTML)
-    else:
-        status_msg = await update.message.reply_text(progress_text, parse_mode=ParseMode.HTML)
+        success, sig_or_err, quote = JupiterSwapEngine.execute_buy(keypair, mint, amount_sol)
 
-    keypair = WalletManager.get_keypair(user_id)
-    if not keypair:
-        await status_msg.edit_text("❌ Error loading wallet keys. Please check /wallet.")
-        return
+        if success:
+            try:
+                m_data = MarketSniffer.get_market_data(mint)
+                if m_data and m_data.get("price_usd"):
+                    u_settings = SettingsManager.get_user_settings(user_id)
+                    e_prices = u_settings.get("entry_prices", {})
+                    e_prices[mint] = m_data["price_usd"]
+                    SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
+            except Exception:
+                pass
 
-    success, sig_or_err, quote = JupiterSwapEngine.execute_buy(keypair, mint, amount_sol)
-
-    if success:
-        try:
-            m_data = MarketSniffer.get_market_data(mint)
-            if m_data and m_data.get("price_usd"):
-                u_settings = SettingsManager.get_user_settings(user_id)
-                e_prices = u_settings.get("entry_prices", {})
-                e_prices[mint] = m_data["price_usd"]
-                SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
-        except Exception:
-            pass
-
-        success_msg = (
-            "🎉 <b>BUY SUCCESSFUL!</b>\n\n"
-            f"💸 <b>Spent:</b> <code>{amount_sol} SOL</code>\n"
-            f"🪙 <b>Token:</b> <code>{mint}</code>\n"
-            f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>\n\n"
-            "<i>Manage your position below:</i>"
-        )
-        sell_markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔴 Sell 25%", callback_data=f"sell:{mint}:25"),
-                InlineKeyboardButton("🔴 Sell 50%", callback_data=f"sell:{mint}:50"),
-                InlineKeyboardButton("🔴 Sell 100%", callback_data=f"sell:{mint}:100"),
-            ],
-            [
-                InlineKeyboardButton("🎒 My Positions", callback_data="positions_menu"),
-                InlineKeyboardButton("🔎 Resniff Token", callback_data=f"refresh:{mint}"),
-            ],
-            [
-                InlineKeyboardButton("💳 Wallet", callback_data="wallet_menu"),
-                InlineKeyboardButton("🔙 Home", callback_data="home_menu"),
-            ]
-        ])
-        await status_msg.edit_text(success_msg, parse_mode=ParseMode.HTML, reply_markup=sell_markup, disable_web_page_preview=True)
-    else:
-        await status_msg.edit_text(
-            f"❌ <b>Buy Failed:</b>\n\n"
-            f"<i>{html.escape(str(sig_or_err))}</i>\n\n"
-            "💡 Try checking if the pool has sufficient liquidity.",
-            parse_mode=ParseMode.HTML
-        )
+            success_msg = (
+                "🎉 <b>BUY SUCCESSFUL!</b>\n\n"
+                f"💸 <b>Spent:</b> <code>{amount_sol:.4f} SOL</code>\n"
+                f"🪙 <b>Token:</b> <code>{mint}</code>\n"
+                f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>\n\n"
+                "<i>Manage your position below:</i>"
+            )
+            sell_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔴 Sell 25%", callback_data=f"sell:{mint}:25"),
+                    InlineKeyboardButton("🔴 Sell 50%", callback_data=f"sell:{mint}:50"),
+                    InlineKeyboardButton("🔴 Sell 100%", callback_data=f"sell:{mint}:100"),
+                ],
+                [
+                    InlineKeyboardButton("🎒 My Positions", callback_data="positions_menu"),
+                    InlineKeyboardButton("🔎 Resniff Token", callback_data=f"refresh:{mint}"),
+                ],
+                [
+                    InlineKeyboardButton("💳 Wallet", callback_data="wallet_menu"),
+                    InlineKeyboardButton("🔙 Home", callback_data="home_menu"),
+                ]
+            ])
+            await status_msg.edit_text(success_msg, parse_mode=ParseMode.HTML, reply_markup=sell_markup, disable_web_page_preview=True)
+        else:
+            await status_msg.edit_text(
+                f"❌ <b>Buy Failed:</b>\n\n"
+                f"<i>{html.escape(str(sig_or_err))}</i>\n\n"
+                "💡 Try checking if the pool has sufficient liquidity.",
+                parse_mode=ParseMode.HTML
+            )
 
 
 async def execute_sol_to_usdt_action(
@@ -915,40 +977,49 @@ async def execute_sol_to_usdt_action(
     callback_query = None
 ):
     """Swaps SOL to USDT"""
-    pubkey = WalletManager.get_public_key(user_id)
-    balance = WalletManager.get_sol_balance(pubkey)
+    async with UserTradeLock(user_id) as acquired:
+        if not acquired:
+            warn_msg = "⏳ <b>Trade in progress:</b> Please wait for your previous transaction to complete."
+            if callback_query:
+                await callback_query.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
+            return
 
-    needed_sol = amount_sol + FEE_RESERVE_SOL
-    if balance < needed_sol:
-        err_msg = f"❌ Insufficient SOL balance ({balance:.4f} SOL available)."
+        pubkey = WalletManager.get_public_key(user_id)
+        balance = WalletManager.get_sol_balance(pubkey)
+
+        needed_sol = amount_sol + FEE_RESERVE_SOL
+        if balance < needed_sol:
+            err_msg = f"❌ Insufficient SOL balance ({balance:.4f} SOL available)."
+            if callback_query:
+                await callback_query.message.reply_text(err_msg)
+            else:
+                await update.message.reply_text(err_msg)
+            return
+
+        status_text = f"⏳ <i>Swapping {amount_sol:.4f} SOL ➡️ USDT via Jupiter...</i>"
         if callback_query:
-            await callback_query.message.reply_text(err_msg)
+            status_msg = await callback_query.message.reply_text(status_text, parse_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text(err_msg)
-        return
+            status_msg = await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
 
-    status_text = f"⏳ <i>Swapping {amount_sol} SOL ➡️ USDT via Jupiter...</i>"
-    if callback_query:
-        status_msg = await callback_query.message.reply_text(status_text, parse_mode=ParseMode.HTML)
-    else:
-        status_msg = await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
+        keypair = WalletManager.get_keypair(user_id)
+        success, sig_or_err, quote = JupiterSwapEngine.swap_sol_to_usdt(keypair, amount_sol)
 
-    keypair = WalletManager.get_keypair(user_id)
-    success, sig_or_err, quote = JupiterSwapEngine.swap_sol_to_usdt(keypair, amount_sol)
-
-    if success:
-        out_usdt = int(quote.get("outAmount", 0)) / 1_000_000.0 if quote else 0.0
-        await status_msg.edit_text(
-            "🎉 <b>SWAP SUCCESSFUL!</b>\n\n"
-            f"💸 Swapped <code>{amount_sol} SOL</code>\n"
-            f"💵 Received <code>~{out_usdt:.2f} USDT</code>\n\n"
-            f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Back to Swap Menu", callback_data="swap_menu")]])
-        )
-    else:
-        await status_msg.edit_text(f"❌ Swap failed: {html.escape(str(sig_or_err))}")
+        if success:
+            out_usdt = int(quote.get("outAmount", 0)) / 1_000_000.0 if quote else 0.0
+            await status_msg.edit_text(
+                "🎉 <b>SWAP SUCCESSFUL!</b>\n\n"
+                f"💸 Swapped <code>{amount_sol:.4f} SOL</code>\n"
+                f"💵 Received <code>~{out_usdt:.2f} USDT</code>\n\n"
+                f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Back to Swap Menu", callback_data="swap_menu")]])
+            )
+        else:
+            await status_msg.edit_text(f"❌ Swap failed: {html.escape(str(sig_or_err))}")
 
 
 async def execute_usdt_to_sol_action(
@@ -959,39 +1030,48 @@ async def execute_usdt_to_sol_action(
     callback_query = None
 ):
     """Swaps USDT to SOL"""
-    pubkey = WalletManager.get_public_key(user_id)
-    usdt_bal = WalletManager.get_usdt_balance(pubkey)
+    async with UserTradeLock(user_id) as acquired:
+        if not acquired:
+            warn_msg = "⏳ <b>Trade in progress:</b> Please wait for your previous transaction to complete."
+            if callback_query:
+                await callback_query.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
+            return
 
-    if usdt_bal < amount_usdt:
-        err_msg = f"❌ Insufficient USDT balance ({usdt_bal:.2f} USDT available)."
+        pubkey = WalletManager.get_public_key(user_id)
+        usdt_bal = WalletManager.get_usdt_balance(pubkey)
+
+        if usdt_bal < amount_usdt:
+            err_msg = f"❌ Insufficient USDT balance ({usdt_bal:.2f} USDT available)."
+            if callback_query:
+                await callback_query.message.reply_text(err_msg)
+            else:
+                await update.message.reply_text(err_msg)
+            return
+
+        status_text = f"⏳ <i>Swapping {amount_usdt:.2f} USDT ➡️ SOL via Jupiter...</i>"
         if callback_query:
-            await callback_query.message.reply_text(err_msg)
+            status_msg = await callback_query.message.reply_text(status_text, parse_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text(err_msg)
-        return
+            status_msg = await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
 
-    status_text = f"⏳ <i>Swapping {amount_usdt:.2f} USDT ➡️ SOL via Jupiter...</i>"
-    if callback_query:
-        status_msg = await callback_query.message.reply_text(status_text, parse_mode=ParseMode.HTML)
-    else:
-        status_msg = await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
+        keypair = WalletManager.get_keypair(user_id)
+        success, sig_or_err, quote = JupiterSwapEngine.swap_usdt_to_sol(keypair, amount_usdt)
 
-    keypair = WalletManager.get_keypair(user_id)
-    success, sig_or_err, quote = JupiterSwapEngine.swap_usdt_to_sol(keypair, amount_usdt)
-
-    if success:
-        out_sol = int(quote.get("outAmount", 0)) / 1_000_000_000.0 if quote else 0.0
-        await status_msg.edit_text(
-            "🎉 <b>SWAP SUCCESSFUL!</b>\n\n"
-            f"💵 Swapped <code>{amount_usdt:.2f} USDT</code>\n"
-            f"💸 Received <code>~{out_sol:.4f} SOL</code>\n\n"
-            f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Back to Swap Menu", callback_data="swap_menu")]])
-        )
-    else:
-        await status_msg.edit_text(f"❌ Swap failed: {html.escape(str(sig_or_err))}")
+        if success:
+            out_sol = int(quote.get("outAmount", 0)) / 1_000_000_000.0 if quote else 0.0
+            await status_msg.edit_text(
+                "🎉 <b>SWAP SUCCESSFUL!</b>\n\n"
+                f"💵 Swapped <code>{amount_usdt:.2f} USDT</code>\n"
+                f"💸 Received <code>~{out_sol:.4f} SOL</code>\n\n"
+                f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Back to Swap Menu", callback_data="swap_menu")]])
+            )
+        else:
+            await status_msg.edit_text(f"❌ Swap failed: {html.escape(str(sig_or_err))}")
 
 
 async def safe_answer(query: Any, text: Optional[str] = None, show_alert: bool = False):
@@ -1003,6 +1083,19 @@ async def safe_answer(query: Any, text: Optional[str] = None, show_alert: bool =
             await query.answer()
     except Exception as e:
         logger.debug(f"Callback answer note: {e}")
+
+
+async def auto_hide_message(message: Any, delay: int = 60):
+    """Automatically obscures sensitive credentials after a delay to prevent chat log exposure"""
+    try:
+        await asyncio.sleep(delay)
+        await message.edit_text(
+            "🔒 <b>Private key hidden automatically for security.</b>\n\n"
+            "If you need to view it again, use /wallet in direct private chat.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------
@@ -1067,7 +1160,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         new_mode = "MANUAL" if s.get("mode") == "COPY" else "COPY"
         if new_mode == "COPY" and not s.get("target_wallet"):
             await safe_answer(query, "Please set a Target Wallet first!", show_alert=True)
-            USER_STATES[user_id] = {"type": "set_target_wallet"}
+            USER_STATES[user_id] = {"type": "set_target_wallet", "_ts": time.time()}
             await query.message.reply_text("👤 <b>Set Target Wallet:</b>\nReply with the Solana wallet address you want to copy trade:", parse_mode=ParseMode.HTML)
             return
         SettingsManager.update_user_settings(user_id, {"mode": new_mode})
@@ -1087,19 +1180,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "prompt_set_target_wallet":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_target_wallet"}
+        USER_STATES[user_id] = {"type": "set_target_wallet", "_ts": time.time()}
         await query.message.reply_text("👤 <b>Set Target Wallet:</b>\nReply with the Solana wallet address you wish to copy trade:", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_set_copy_amount":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_copy_amount"}
+        USER_STATES[user_id] = {"type": "set_copy_amount", "_ts": time.time()}
         await query.message.reply_text("💸 <b>Set Copy Buy Size:</b>\nReply with the SOL amount to spend per trade (e.g. <code>0.2</code>):", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_copy_slippage":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_copy_slippage"}
+        USER_STATES[user_id] = {"type": "set_copy_slippage", "_ts": time.time()}
         await query.message.reply_text("⚡ <b>Set Slippage:</b>\nReply with your slippage tolerance percentage (e.g. <code>3.0</code>):", parse_mode=ParseMode.HTML)
         return
 
@@ -1121,7 +1214,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data.startswith("set_ai_strat:"):
         await safe_answer(query)
-        strat = data.split(":", 1)[1]
+        strat = data.split(":", 1)[1].upper().strip()
+        if strat not in ("CONSERVATIVE", "BALANCED", "DEGEN"):
+            strat = "BALANCED"
         SettingsManager.update_user_settings(user_id, {"ai_strategy": strat})
         text, markup = format_ai_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -1129,13 +1224,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "prompt_set_ai_amount":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_ai_amount"}
+        USER_STATES[user_id] = {"type": "set_ai_amount", "_ts": time.time()}
         await query.message.reply_text("💸 <b>Set AI Trade Size:</b>\nReply with max SOL per AI trade (e.g. <code>0.15</code>):", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_set_ai_tpsl":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_ai_tpsl"}
+        USER_STATES[user_id] = {"type": "set_ai_tpsl", "_ts": time.time()}
         await query.message.reply_text("📈 <b>Set Take Profit & Stop Loss:</b>\nReply with: <code>&lt;TP%&gt; &lt;SL%&gt;</code> (e.g. <code>40 15</code> for +40% TP, -15% SL):", parse_mode=ParseMode.HTML)
         return
 
@@ -1210,7 +1305,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Execute quick SOL -> USDT
     if data.startswith("do_swap_sol_usdt:"):
-        amt = float(data.split(":", 1)[1])
+        await safe_answer(query)
+        try:
+            amt = float(data.split(":", 1)[1])
+            if math.isnan(amt) or math.isinf(amt) or amt <= 0.0 or amt > 10_000.0:
+                raise ValueError()
+        except Exception:
+            await query.message.reply_text("❌ Invalid swap amount.", parse_mode=ParseMode.HTML)
+            return
         await execute_sol_to_usdt_action(update, context, user_id, amt, callback_query=query)
         return
 
@@ -1226,7 +1328,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         elif code == "100pct":
             amt = usdt_bal
         else:
-            amt = float(code)
+            try:
+                amt = float(code)
+                if math.isnan(amt) or math.isinf(amt) or amt <= 0.0 or amt > 1_000_000.0:
+                    raise ValueError()
+            except Exception:
+                await safe_answer(query, "Invalid USDT amount.", show_alert=True)
+                return
 
         if amt <= 0:
             await safe_answer(query, "USDT balance is 0.", show_alert=True)
@@ -1238,13 +1346,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "prompt_custom_sol_usdt":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "custom_sol_to_usdt"}
+        USER_STATES[user_id] = {"type": "custom_sol_to_usdt", "_ts": time.time()}
         await query.message.reply_text("✏️ Reply with the amount of SOL to swap to USDT (e.g. <code>0.45</code>):", parse_mode=ParseMode.HTML)
         return
 
     if data == "prompt_custom_usdt_sol":
         await safe_answer(query)
-        USER_STATES[user_id] = {"type": "custom_usdt_to_sol"}
+        USER_STATES[user_id] = {"type": "custom_usdt_to_sol", "_ts": time.time()}
         await query.message.reply_text("✏️ Reply with the amount of USDT to swap to SOL (e.g. <code>25.0</code>):", parse_mode=ParseMode.HTML)
         return
 
@@ -1284,15 +1392,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "2. Click Menu → <b>Add / Connect Wallet</b>\n"
             "3. Select <b>Import Private Key</b>\n"
             "4. Paste the key above and confirm.\n\n"
-            "⚠️ <i>Please delete or hide this message after importing!</i>"
+            "⚠️ <i>For your protection, this message will automatically hide in 60 seconds.</i>"
         )
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Hide / Back to Wallet", callback_data="wallet_menu")]])
-        await query.edit_message_text(reveal_text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        sent_msg = await query.edit_message_text(reveal_text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        asyncio.create_task(auto_hide_message(sent_msg, 60))
         return
 
     # 6. Withdraw Prompt
     if data == "withdraw_prompt":
-        USER_STATES[user_id] = {"type": "withdraw"}
+        if update.effective_chat.type != "private":
+            await safe_answer(query, "⚠️ Withdrawals can only be initiated in private chat.", show_alert=True)
+            return
+        await safe_answer(query)
+        USER_STATES[user_id] = {"type": "withdraw", "_ts": time.time()}
         await query.message.reply_text(
             "💸 <b>Withdraw SOL</b>\n\n"
             "Please reply with your destination Solana address and amount:\n"
@@ -1365,94 +1478,117 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("custom_buy:"):
         await safe_answer(query)
         mint = data.split(":", 1)[1]
-        USER_STATES[user_id] = {"type": "custom_buy", "mint": mint}
+        USER_STATES[user_id] = {"type": "custom_buy", "mint": mint, "_ts": time.time()}
         await query.message.reply_text("✏️ <b>Custom Buy:</b> Reply with the amount of SOL to spend (e.g. <code>0.35</code>):", parse_mode=ParseMode.HTML)
         return
 
     # 10. Buy Execution
     if data.startswith("buy:"):
         await safe_answer(query)
-        _, mint, amount_str = data.split(":", 2)
-        amount = float(amount_str)
+        try:
+            _, mint, amount_str = data.split(":", 2)
+            if not MarketSniffer.is_valid_solana_address(mint):
+                raise ValueError()
+            amount = float(amount_str)
+            if math.isnan(amount) or math.isinf(amount) or amount <= 0.0 or amount > 1000.0:
+                raise ValueError()
+        except Exception:
+            await query.message.reply_text("❌ Invalid buy parameters.", parse_mode=ParseMode.HTML)
+            return
         await execute_buy_action(update, context, user_id, mint, amount, callback_query=query)
         return
 
     # 11. Sell Execution
     if data.startswith("sell:"):
         await safe_answer(query)
-        _, mint, pct_str = data.split(":", 2)
-        pct = float(pct_str)
+        try:
+            _, mint, pct_str = data.split(":", 2)
+            if not MarketSniffer.is_valid_solana_address(mint):
+                raise ValueError()
+            pct = float(pct_str)
+            if math.isnan(pct) or math.isinf(pct) or pct <= 0.0 or pct > 100.0:
+                raise ValueError()
+        except Exception:
+            await query.message.reply_text("❌ Invalid sell percentage.", parse_mode=ParseMode.HTML)
+            return
 
-        status_msg = await query.message.reply_text(
-            f"⏳ <b>Executing Sell Order ({pct:.0f}%)...</b>\n"
-            "🛡️ <i>Routing via Jupiter Aggregator back to native SOL...</i>",
-            parse_mode=ParseMode.HTML
-        )
+        async with UserTradeLock(user_id) as acquired:
+            if not acquired:
+                await query.message.reply_text("⏳ <b>Trade in progress:</b> Please wait for your previous transaction to complete.", parse_mode=ParseMode.HTML)
+                return
 
-        keypair = WalletManager.get_keypair(user_id)
-        success, sig_or_err, quote = JupiterSwapEngine.execute_sell(keypair, mint, percentage=pct)
-
-        if success:
-            if pct >= 100:
-                try:
-                    u_settings = SettingsManager.get_user_settings(user_id)
-                    e_prices = u_settings.get("entry_prices", {})
-                    if mint in e_prices:
-                        del e_prices[mint]
-                        SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
-                except Exception:
-                    pass
-
-            out_sol = int(quote.get("outAmount", 0)) / 1_000_000_000.0 if quote else 0.0
-            await status_msg.edit_text(
-                "🎉 <b>SELL SUCCESSFUL!</b>\n\n"
-                f"💰 <b>Received:</b> <code>~{out_sol:.4f} SOL</code>\n"
-                f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+            status_msg = await query.message.reply_text(
+                f"⏳ <b>Executing Sell Order ({pct:.0f}%)...</b>\n"
+                "🛡️ <i>Routing via Jupiter Aggregator back to native SOL...</i>",
+                parse_mode=ParseMode.HTML
             )
-        else:
-            await status_msg.edit_text(f"❌ <b>Sell Failed:</b>\n\n<i>{html.escape(str(sig_or_err))}</i>", parse_mode=ParseMode.HTML)
+
+            keypair = WalletManager.get_keypair(user_id)
+            success, sig_or_err, quote = JupiterSwapEngine.execute_sell(keypair, mint, percentage=pct)
+
+            if success:
+                if pct >= 100:
+                    try:
+                        u_settings = SettingsManager.get_user_settings(user_id)
+                        e_prices = u_settings.get("entry_prices", {})
+                        if mint in e_prices:
+                            del e_prices[mint]
+                            SettingsManager.update_user_settings(user_id, {"entry_prices": e_prices})
+                    except Exception:
+                        pass
+
+                out_sol = int(quote.get("outAmount", 0)) / 1_000_000_000.0 if quote else 0.0
+                await status_msg.edit_text(
+                    "🎉 <b>SELL SUCCESSFUL!</b>\n\n"
+                    f"💰 <b>Received:</b> <code>~{out_sol:.4f} SOL</code>\n"
+                    f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            else:
+                await status_msg.edit_text(f"❌ <b>Sell Failed:</b>\n\n<i>{html.escape(str(sig_or_err))}</i>", parse_mode=ParseMode.HTML)
         return
 
     # 12. ALPHA WALLET CALLBACKS (Admin only)
     if data.startswith("alpha_"):
         global ACTIVE_ADMIN_ID
-        if ACTIVE_ADMIN_ID != 0 and user_id != ACTIVE_ADMIN_ID:
-            await safe_answer(query, "Unauthorized.", show_alert=True)
+        if not ACTIVE_ADMIN_ID or user_id != ACTIVE_ADMIN_ID:
+            await safe_answer(query, "⛔ Unauthorized admin access.", show_alert=True)
             return
 
-    if data == "alpha_refresh":
-        await safe_answer(query)
-        await alpha_command(update, context)
-        return
-
-    if data == "alpha_export_pk":
-        if update.effective_chat.type != "private":
-            await safe_answer(query, "⚠️ Admin actions are only available in direct private chat with the bot.", show_alert=True)
+        if data == "alpha_refresh":
+            await safe_answer(query)
+            await alpha_command(update, context)
             return
-        await safe_answer(query)
-        alpha_data = WalletManager.get_or_create_alpha_wallet()
-        pk = alpha_data["private_key_b58"]
-        text = (
-            "👑 <b>Alpha Wallet Private Key (Phantom Import):</b>\n\n"
-            f"<code>{pk}</code> <i>(tap to copy)</i>\n\n"
-            "⚠️ <i>Keep this secret! Import into Phantom to access accumulated fees anytime.</i>"
-        )
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Alpha", callback_data="alpha_refresh")]])
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        return
 
-    if data == "alpha_withdraw_prompt":
-        await safe_answer(query)
-        USER_STATES[user_id] = {"type": "alpha_withdraw"}
-        await query.message.reply_text(
-            "💸 <b>Withdraw Alpha Earnings</b>\n\n"
-            "Reply with your personal Solana address:\n"
-            "<code>&lt;YOUR_PHANTOM_ADDRESS&gt; all</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
+        if data == "alpha_export_pk":
+            if update.effective_chat.type != "private":
+                await safe_answer(query, "⚠️ Admin actions are only available in direct private chat with the bot.", show_alert=True)
+                return
+            await safe_answer(query)
+            alpha_data = WalletManager.get_or_create_alpha_wallet()
+            pk = alpha_data["private_key_b58"]
+            text = (
+                "👑 <b>Alpha Wallet Private Key (Phantom Import):</b>\n\n"
+                f"<code>{pk}</code> <i>(tap to copy)</i>\n\n"
+                "⚠️ <i>Keep this secret! Import into Phantom to access accumulated fees anytime.\n"
+                "For your security, this message will automatically hide in 60 seconds.</i>"
+            )
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Alpha", callback_data="alpha_refresh")]])
+            sent_msg = await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            asyncio.create_task(auto_hide_message(sent_msg, 60))
+            return
+
+        if data == "alpha_withdraw_prompt":
+            await safe_answer(query)
+            USER_STATES[user_id] = {"type": "alpha_withdraw", "_ts": time.time()}
+            await query.message.reply_text(
+                "💸 <b>Withdraw Alpha Earnings</b>\n\n"
+                "Reply with your personal Solana address:\n"
+                "<code>&lt;YOUR_PHANTOM_ADDRESS&gt; all</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
 
 
 async def background_trader_worker(application: Application):
@@ -1672,6 +1808,19 @@ async def background_trader_worker(application: Application):
         await asyncio.sleep(2.5)
 
 
+async def supervised_background_worker(application: Application):
+    """Supervises the background trader worker and auto-restarts on unexpected crashes"""
+    while True:
+        try:
+            await background_trader_worker(application)
+        except asyncio.CancelledError:
+            logger.info("Background trader worker cancelled.")
+            break
+        except Exception as e:
+            logger.critical(f"Fatal crash in background_trader_worker, restarting in 5s: {e}", exc_info=True)
+            await asyncio.sleep(5.0)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Global error handler"""
     logger.error("Exception handling update:", exc_info=context.error)
@@ -1681,7 +1830,7 @@ async def post_init(application: Application):
     """Executed once bot authenticates with Telegram"""
     me = application.bot
     print(f"✅ Market Sniffer Bot is live! Logged in as: {me.first_name} (@{me.username})")
-    asyncio.create_task(background_trader_worker(application))
+    asyncio.create_task(supervised_background_worker(application))
 
 
 def main():
@@ -1731,7 +1880,7 @@ def main():
 
     print("📡 Connecting Market Sniffer to Telegram...")
     app.run_polling(
-        drop_pending_updates=False,
+        drop_pending_updates=True,
         bootstrap_retries=-1,
         timeout=20,
         poll_interval=1.0,

@@ -3,6 +3,7 @@ import time
 import requests
 from typing import Optional, Dict, Any, Tuple
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
 from config import (
@@ -13,6 +14,8 @@ from config import (
     RPC_ENDPOINT,
     DEFAULT_SLIPPAGE_BPS,
     FEE_PERCENT,
+    FEE_RESERVE_SOL,
+    PRIORITY_FEE_MODE,
 )
 from wallet_manager import WalletManager
 
@@ -26,14 +29,21 @@ class JupiterSwapEngine:
         slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
     ) -> Optional[Dict[str, Any]]:
         """
-        Fetches best swap route from Jupiter v1 quote API.
+        Fetches best swap route from Jupiter v1 quote API with input validation.
         """
+        if amount <= 0:
+            return None
         try:
+            Pubkey.from_string(input_mint.strip())
+            Pubkey.from_string(output_mint.strip())
+            # Cap slippage between 0.1% and 15% to prevent MEV sandwich attacks
+            safe_slippage = max(10, min(int(slippage_bps), 1500))
+
             params = {
-                "inputMint": input_mint,
-                "outputMint": output_mint,
+                "inputMint": input_mint.strip(),
+                "outputMint": output_mint.strip(),
                 "amount": str(amount),
-                "slippageBps": str(slippage_bps),
+                "slippageBps": str(safe_slippage),
             }
             res = requests.get(JUPITER_QUOTE_API, params=params, timeout=10)
             if res.status_code == 200:
@@ -48,19 +58,20 @@ class JupiterSwapEngine:
     def build_and_sign_swap(
         keypair: Keypair,
         quote_response: Dict[str, Any],
-        priority_fee: str = "auto",
+        priority_fee: Optional[str] = None,
     ) -> Optional[str]:
         """
         Sends quote to Jupiter /swap endpoint, receives base64 transaction,
         signs it locally with the keypair in memory, and returns base64 signed transaction.
         """
+        fee_mode = priority_fee or PRIORITY_FEE_MODE or "auto"
         try:
             payload = {
                 "quoteResponse": quote_response,
                 "userPublicKey": str(keypair.pubkey()),
                 "wrapAndUnwrapSol": True,
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": priority_fee,
+                "prioritizationFeeLamports": fee_mode,
             }
             res = requests.post(JUPITER_SWAP_API, json=payload, timeout=12)
             if res.status_code != 200:
@@ -130,10 +141,20 @@ class JupiterSwapEngine:
         slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
-        Executes a Buy order: swaps SOL -> token_mint with silent 1% fee routing.
+        Executes a Buy order: swaps SOL -> token_mint with pre-flight balance verification.
         """
-        total_lamports = int(sol_amount * 1_000_000_000)
-        fee_lamports = int(total_lamports * FEE_PERCENT)
+        if sol_amount <= 0:
+            return False, "Buy amount must be positive.", None
+
+        # Pre-flight balance check: Ensure user has enough SOL to trade plus gas reserve
+        user_pubkey = str(keypair.pubkey())
+        current_bal = WalletManager.get_sol_balance(user_pubkey)
+        needed_sol = sol_amount + FEE_RESERVE_SOL
+        if current_bal < needed_sol:
+            return False, f"Insufficient SOL balance. Available: {current_bal:.4f} SOL, Needed: {needed_sol:.4f} SOL (including {FEE_RESERVE_SOL} SOL fee reserve).", None
+
+        total_lamports = round(sol_amount * 1_000_000_000)
+        fee_lamports = round(total_lamports * FEE_PERCENT)
         trade_lamports = max(1, total_lamports - fee_lamports)
         fee_sol = fee_lamports / 1_000_000_000.0
 
@@ -172,6 +193,9 @@ class JupiterSwapEngine:
         """
         Executes a Sell order: swaps token_mint -> SOL with silent 1% fee routing.
         """
+        if percentage <= 0.0 or percentage > 100.0:
+            return False, "Sell percentage must be between 0.1% and 100%.", None
+
         # 1. Get user's current token balance
         ui_balance, raw_balance = WalletManager.get_token_balance(
             str(keypair.pubkey()), token_mint
@@ -182,7 +206,7 @@ class JupiterSwapEngine:
         if percentage >= 100.0:
             sell_raw = raw_balance
         else:
-            sell_raw = int(raw_balance * (percentage / 100.0))
+            sell_raw = round(raw_balance * (percentage / 100.0))
         if sell_raw <= 0:
             return False, "Calculated sell amount is 0.", None
 
@@ -206,7 +230,7 @@ class JupiterSwapEngine:
 
         if success:
             out_lamports = int(quote.get("outAmount", 0))
-            fee_lamports = int(out_lamports * FEE_PERCENT)
+            fee_lamports = round(out_lamports * FEE_PERCENT)
             fee_sol = fee_lamports / 1_000_000_000.0
             if fee_sol >= 0.00001:
                 time.sleep(1.5)  # Allow RPC to index the newly received SOL
@@ -227,8 +251,16 @@ class JupiterSwapEngine:
         """
         Swaps native SOL -> USDT with silent 1% fee routing.
         """
-        total_lamports = int(sol_amount * 1_000_000_000)
-        fee_lamports = int(total_lamports * FEE_PERCENT)
+        if sol_amount <= 0:
+            return False, "Amount must be positive.", None
+
+        user_pub = str(keypair.pubkey())
+        bal = WalletManager.get_sol_balance(user_pub)
+        if bal < (sol_amount + FEE_RESERVE_SOL):
+            return False, f"Insufficient SOL balance ({bal:.4f} SOL).", None
+
+        total_lamports = round(sol_amount * 1_000_000_000)
+        fee_lamports = round(total_lamports * FEE_PERCENT)
         trade_lamports = max(1, total_lamports - fee_lamports)
         fee_sol = fee_lamports / 1_000_000_000.0
 
@@ -261,7 +293,15 @@ class JupiterSwapEngine:
         """
         Swaps USDT -> native SOL with silent 1% fee routing.
         """
-        raw_usdt = int(usdt_amount * 1_000_000)  # USDT has 6 decimals
+        if usdt_amount <= 0:
+            return False, "Amount must be positive.", None
+
+        user_pub = str(keypair.pubkey())
+        usdt_bal = WalletManager.get_usdt_balance(user_pub)
+        if usdt_bal < usdt_amount:
+            return False, f"Insufficient USDT balance ({usdt_bal:.2f} USDT).", None
+
+        raw_usdt = round(usdt_amount * 1_000_000)  # USDT has 6 decimals
 
         quote = cls.get_quote(
             input_mint=USDT_MINT,
@@ -279,7 +319,7 @@ class JupiterSwapEngine:
         success, sig_or_err = cls.send_and_confirm_transaction(signed_tx_b64)
         if success:
             out_lamports = int(quote.get("outAmount", 0))
-            fee_lamports = int(out_lamports * FEE_PERCENT)
+            fee_lamports = round(out_lamports * FEE_PERCENT)
             fee_sol = fee_lamports / 1_000_000_000.0
             if fee_sol >= 0.00001:
                 time.sleep(1.5)  # Allow RPC to index the newly received SOL
