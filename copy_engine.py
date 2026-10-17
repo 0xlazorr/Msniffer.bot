@@ -132,16 +132,8 @@ class SettingsManager:
 
     @classmethod
     def get_active_ai_traders(cls) -> List[Tuple[int, dict]]:
-        """Returns list of (user_id, settings) where mode == 'AI'"""
-        try:
-            all_data = cls._load_all()
-        except Exception:
-            return []
-        active = []
-        for uid_str, s in all_data.items():
-            if s.get("mode") == "AI":
-                active.append((int(uid_str), s))
-        return active
+        """Deprecated: Returns empty list. AI Autopilot is managed exclusively by Chatters AI Council."""
+        return []
 
 
 class CopyTradingEngine:

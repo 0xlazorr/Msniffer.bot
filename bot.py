@@ -97,31 +97,31 @@ def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
     settings = SettingsManager.get_user_settings(user_id)
     mode = settings.get("mode", "MANUAL")
+    if mode == "AI":
+        mode = "MANUAL"
+        SettingsManager.update_user_settings(user_id, {"mode": "MANUAL"})
 
     if mode == "COPY":
         target = settings.get("target_wallet", "")
         target_display = f"<code>{target[:6]}...{target[-4:]}</code>" if target else "<i>(target not set)</i>"
         mode_badge = f"🎯 <b>Copy Trading</b> ({target_display})"
-    elif mode == "AI":
-        strategy = settings.get("ai_strategy", "BALANCED")
-        mode_badge = f"🤖 <b>AI Autopilot</b> (<code>{strategy}</code>)"
     else:
-        mode_badge = "⏸️ <b>Manual Sniper</b>"
+        mode_badge = "🏛️ <b>AI Council Webhook Active</b>"
 
     text = (
         "🐕🔎 <b>Market Sniffer</b>\n"
-        "<i>Solana Sniper, Copy & AI Auto-Trader</i>\n\n"
+        "<i>Solana Sniper, Copy Trader & AI Council Bridge</i>\n\n"
         "Paste any <b>Token Contract Address (CA)</b> to audit safety and trade instantly.\n\n"
         "📬 <b>Your Trading Wallet:</b>\n"
         f"<code>{pubkey}</code> <i>(tap to copy)</i>\n\n"
         f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n"
-        f"🎮 <b>Active Mode:</b> {mode_badge}\n"
+        f"🎮 <b>Active Engine:</b> {mode_badge}\n"
     )
 
     markup = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🎯 Copy Trading", callback_data="copy_menu"),
-            InlineKeyboardButton("🤖 AI Autopilot", callback_data="ai_menu"),
+            InlineKeyboardButton("🏛️ AI Council Status", callback_data="ai_menu"),
         ],
         [
             InlineKeyboardButton("⚡ Swap SOL ⇄ USDT", callback_data="swap_menu"),
@@ -212,47 +212,30 @@ def format_copy_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def format_ai_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Builds AI Autopilot Dashboard"""
-    settings = SettingsManager.get_user_settings(user_id)
-    mode = settings.get("mode", "MANUAL")
-    is_active = (mode == "AI")
-    strategy = settings.get("ai_strategy", "BALANCED")
-    trade_amt = settings.get("ai_trade_amount_sol", 0.1)
-    tp_pct = settings.get("ai_take_profit_pct", 30.0)
-    sl_pct = settings.get("ai_stop_loss_pct", 15.0)
-
-    status_str = "🟢 <b>ACTIVE (Autopilot Engaged)</b>" if is_active else "⏸️ <b>PAUSED</b>"
+    """Displays AI Council Integration Status (replacing redundant legacy local AI autopilot)."""
+    pubkey = WalletManager.get_public_key(user_id)
+    sol_bal = WalletManager.get_sol_balance(pubkey) if pubkey else 0.0
 
     text = (
-        "🤖 <b>AUTOPILOT TRADING DASHBOARD</b>\n"
-        "<i>Algorithmic market scanning, momentum breakout execution & auto risk management</i>\n\n"
-        f"📊 <b>Engine Status:</b> {status_str}\n"
-        f"🎯 <b>Active Strategy:</b> <b>{strategy}</b>\n"
-        f"💸 <b>Max Trade Size:</b> <code>{trade_amt:.2f} SOL</code>\n"
-        f"📈 <b>Take Profit:</b> <code>+{tp_pct:.0f}%</code> | <b>Stop Loss:</b> <code>-{sl_pct:.0f}%</code>\n\n"
-        "📊 <b>Strategy Profiles:</b>\n"
-        "• <b>Balanced:</b> High-momentum breakouts with verified liquidity ($15K+) & revoked authorities.\n"
-        "• <b>Degen:</b> Aggressive pump.fun curve volume scalping ($4K+ liquidity).\n"
-        "• <b>Conservative:</b> Ultra-safe institutional filtering ($50K+ liquidity, zero warnings).\n\n"
-        "💡 <i>When active, the autopilot automatically identifies high-probability breakout patterns and secures profit on target.</i>"
+        "🏛️ <b>CHATTERS AI COUNCIL INTEGRATION</b>\n"
+        "───────────────────────────────\n"
+        "🤖 <b>AI Deliberation & Autopilot:</b> 🟢 <b>Unified Council Active</b>\n"
+        "🐕 <b>Execution Bridge:</b> Market Sniffer Webhook (<code>127.0.0.1:8088</code>)\n"
+        f"💳 <b>Trading Wallet:</b> <code>{sol_bal:.4f} SOL</code>\n"
+        "───────────────────────────────\n"
+        "<b>Active Council Protections:</b>\n"
+        "• <b>5 AI Agents:</b> Claude, GPT, DeepSeek, Gemini, Grok with 60% majority consensus.\n"
+        "• <b>2-Hour Token Seasoning:</b> Filters early pump-and-dump rugs; re-evaluates mature breakouts.\n"
+        "• <b>Smart Runner Exit Ratchet:</b> -20% Stop Loss ➔ Breakeven lock ➔ 25% peak trail.\n"
+        "• <b>Profit Vault:</b> Realized profits automatically swept into USDT.\n"
+        "───────────────────────────────\n"
+        "💡 <i>Autopilot is fully controlled in your Chatters group via</i> <code>/auto</code> <i>and</i> <code>/menu</code>."
     )
-
-    toggle_btn_text = "⏸️ Pause Autopilot" if is_active else "▶️ Activate Autopilot"
-
-    strat_buttons = [
-        InlineKeyboardButton(("✅ " if strategy == "BALANCED" else "") + "Balanced", callback_data="set_ai_strat:BALANCED"),
-        InlineKeyboardButton(("✅ " if strategy == "DEGEN" else "") + "Degen", callback_data="set_ai_strat:DEGEN"),
-        InlineKeyboardButton(("✅ " if strategy == "CONSERVATIVE" else "") + "Conservative", callback_data="set_ai_strat:CONSERVATIVE"),
-    ]
 
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(toggle_btn_text, callback_data="toggle_ai_mode"),
-        ],
-        strat_buttons,
-        [
-            InlineKeyboardButton("💸 Set Trade Size", callback_data="prompt_set_ai_amount"),
-            InlineKeyboardButton("📈 Set TP / SL", callback_data="prompt_set_ai_tpsl"),
+            InlineKeyboardButton("🎒 View My Positions", callback_data="positions_menu"),
+            InlineKeyboardButton("⚡ Quick Swap", callback_data="swap_menu"),
         ],
         [
             InlineKeyboardButton("🔙 Back to Home", callback_data="home_menu"),
@@ -1259,35 +1242,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
-    if data == "toggle_ai_mode":
-        s = SettingsManager.get_user_settings(user_id)
-        new_mode = "MANUAL" if s.get("mode") == "AI" else "AI"
-        SettingsManager.update_user_settings(user_id, {"mode": new_mode})
-        await safe_answer(query, f"AI Autopilot {'Engaged!' if new_mode == 'AI' else 'Paused.'}", show_alert=True)
+    if data == "toggle_ai_mode" or data.startswith("set_ai_strat:") or data in ("prompt_set_ai_amount", "prompt_set_ai_tpsl"):
+        await safe_answer(query, "🏛️ AI Autopilot & Deliberation is managed exclusively by Chatters AI Council (/auto).", show_alert=True)
         text, markup = format_ai_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        return
-
-    if data.startswith("set_ai_strat:"):
-        await safe_answer(query)
-        strat = data.split(":", 1)[1].upper().strip()
-        if strat not in ("CONSERVATIVE", "BALANCED", "DEGEN"):
-            strat = "BALANCED"
-        SettingsManager.update_user_settings(user_id, {"ai_strategy": strat})
-        text, markup = format_ai_menu(user_id)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-        return
-
-    if data == "prompt_set_ai_amount":
-        await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_ai_amount", "_ts": time.time()}
-        await query.message.reply_text("💸 <b>Set AI Trade Size:</b>\nReply with max SOL per AI trade (e.g. <code>0.15</code>):", parse_mode=ParseMode.HTML)
-        return
-
-    if data == "prompt_set_ai_tpsl":
-        await safe_answer(query)
-        USER_STATES[user_id] = {"type": "set_ai_tpsl", "_ts": time.time()}
-        await query.message.reply_text("📈 <b>Set Take Profit & Stop Loss:</b>\nReply with: <code>&lt;TP%&gt; &lt;SL%&gt;</code> (e.g. <code>40 15</code> for +40% TP, -15% SL):", parse_mode=ParseMode.HTML)
         return
 
     # 5. Import Wallet Prompt Callback
@@ -1740,134 +1698,8 @@ async def background_trader_worker(application: Application):
                                 except Exception:
                                     pass
 
-            # --- 2. AI POSITION EXIT MONITOR (TP / SL) ---
-            active_ai = SettingsManager.get_active_ai_traders()
-            for user_id, settings in active_ai:
-                if not application.running:
-                    break
-                entry_prices = settings.get("entry_prices", {})
-                if not entry_prices:
-                    continue
-
-                tp = settings.get("ai_take_profit_pct", 30.0)
-                sl = settings.get("ai_stop_loss_pct", 15.0)
-
-                exits = await asyncio.to_thread(
-                    AITradingEngine.check_position_exits,
-                    user_id=user_id,
-                    entry_prices=entry_prices,
-                    take_profit_pct=tp,
-                    stop_loss_pct=sl
-                )
-
-                for ex in exits:
-                    mint = ex.get("mint", "")
-                    symbol = ex.get("symbol", "TOKEN")
-                    if ex.get("success"):
-                        entry_prices.pop(mint, None)
-                        SettingsManager.update_user_settings(user_id, {"entry_prices": entry_prices})
-                        action_title = "🎉 <b>TAKE PROFIT HIT!</b>" if ex["action"] == "TAKE_PROFIT" else "🛑 <b>STOP LOSS TRIGGERED!</b>"
-                        pct_val = ex.get("gain_pct", ex.get("loss_pct", 0.0))
-                        exit_msg = (
-                            f"{action_title}\n\n"
-                            f"🪙 <b>Token:</b> ${html.escape(symbol)} (<code>{mint}</code>)\n"
-                            f"📊 <b>P&L:</b> <code>{'+' if ex['action'] == 'TAKE_PROFIT' else '-'}{pct_val:.1f}%</code>\n"
-                            f"🔗 <a href='https://solscan.io/tx/{ex.get('sig')}'>View on Solscan</a>"
-                        )
-                        try:
-                            await application.bot.send_message(
-                                chat_id=user_id,
-                                text=exit_msg,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True
-                            )
-                        except Exception:
-                            pass
-
-            # --- 3. AUTONOMOUS ALGORITHMIC MARKET SCANNER & AUTO-TRADER ---
-            if active_ai and (now - last_market_scan_time) >= 40.0:
-                last_market_scan_time = now
-                for user_id, settings in active_ai:
-                    if not application.running:
-                        break
-                    # Cooldown check: 10 minutes between automated buys per user
-                    last_buy_time = settings.get("last_ai_trade_time", 0.0)
-                    if (now - last_buy_time) < 600.0:
-                        continue
-
-                    pubkey = WalletManager.get_public_key(user_id)
-                    if not pubkey:
-                        continue
-
-                    # Balance check: ensure user has enough SOL to cover trade + gas reserve
-                    trade_amt = float(settings.get("ai_trade_amount_sol", 0.1))
-                    sol_bal = WalletManager.get_sol_balance(pubkey)
-                    if sol_bal < (trade_amt + FEE_RESERVE_SOL + 0.01):
-                        continue
-
-                    # Position count limit: max 3 open positions simultaneously
-                    positions = WalletManager.get_all_positions(pubkey)
-                    active_pos = [p for p in positions if p.get("ui_amount", 0.0) > 0.0001]
-                    if len(active_pos) >= 3:
-                        continue
-
-                    owned_mints = [p["mint"] for p in active_pos]
-                    strategy = settings.get("ai_strategy", "BALANCED")
-
-                    # Run Pattern Recognition Scanner across live Solana market
-                    candidate = await asyncio.to_thread(
-                        AITradingEngine.scan_and_select_trade_candidate,
-                        strategy=strategy,
-                        user_positions=owned_mints
-                    )
-
-                    if candidate:
-                        mint = candidate["mint"]
-                        market = candidate.get("market", {})
-                        symbol = market.get("symbol", "TOKEN")
-                        price_usd = market.get("price_usd", 0.0)
-                        pattern = candidate.get("pattern", "Volume Surge & Breakout")
-                        score = candidate.get("score", 75.0)
-
-                        keypair = WalletManager.get_keypair(user_id)
-                        slippage = int(settings.get("slippage_bps", DEFAULT_SLIPPAGE_BPS))
-
-                        success, sig_or_err, quote = await asyncio.to_thread(
-                            JupiterSwapEngine.execute_buy,
-                            keypair, mint, trade_amt, slippage_bps=slippage
-                        )
-
-                        if success:
-                            e_prices = settings.get("entry_prices", {})
-                            e_prices[mint] = price_usd
-                            SettingsManager.update_user_settings(user_id, {
-                                "entry_prices": e_prices,
-                                "last_ai_trade_time": now,
-                            })
-
-                            tp_pct = settings.get("ai_take_profit_pct", 30.0)
-                            sl_pct = settings.get("ai_stop_loss_pct", 15.0)
-
-                            alert_text = (
-                                "🤖 <b>ALGORITHMIC AUTOPILOT BUY EXECUTED!</b>\n\n"
-                                f"🪙 <b>Token:</b> ${html.escape(symbol)} (<code>{mint}</code>)\n"
-                                f"📊 <b>Pattern Detected:</b> <i>{html.escape(pattern)}</i>\n"
-                                f"🎯 <b>Strategy:</b> <b>{strategy}</b> (Pattern Score: <b>{score:.0f}/100</b>)\n"
-                                f"💸 <b>Amount Spent:</b> <code>{trade_amt} SOL</code>\n"
-                                f"📈 <b>Take Profit:</b> <code>+{tp_pct:.0f}%</code> | <b>Stop Loss:</b> <code>-{sl_pct:.0f}%</code>\n\n"
-                                f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>"
-                            )
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=user_id,
-                                    text=alert_text,
-                                    parse_mode=ParseMode.HTML,
-                                    disable_web_page_preview=True
-                                )
-                            except Exception as err:
-                                logger.error(f"Failed to send auto-trade alert to {user_id}: {err}")
-                        else:
-                            logger.warning(f"Auto-trade buy failed for {user_id} on {mint}: {sig_or_err}")
+            # Note: AI Autopilot & Breakout Scanning is exclusively handled by Chatters AI Council
+            # (Multi-Agent Deliberation, 2h Incubator Seasoning, and Smart Runner Exits via Webhook).
 
         except asyncio.CancelledError:
             break
