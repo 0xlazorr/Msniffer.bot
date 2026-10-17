@@ -628,240 +628,239 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if extracted_ca and state_type in ("custom_buy", "custom_sol_to_usdt", "custom_usdt_to_sol"):
                 USER_STATES.pop(user_id, None)
                 state = None
-            # Will proceed to sniffing extracted_ca below
-        elif state_type == "custom_buy":
-            mint = state["mint"]
-            del USER_STATES[user_id]
-            amount = parse_positive_float(text, max_val=500.0)
-            if amount is None:
-                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. 0.35). Type /cancel to abort.")
-                return
-            await execute_buy_action(update, context, user_id, mint, amount)
-            return
-
-        # Withdraw
-        elif state_type == "withdraw":
-            del USER_STATES[user_id]
-            parts = text.split()
-            if len(parts) < 1:
-                await update.message.reply_text("Usage: <code>&lt;destination_address&gt; [amount_or_all]</code>", parse_mode=ParseMode.HTML)
-                return
-
-            dest_addr = parts[0].strip()
-            if not MarketSniffer.is_valid_solana_address(dest_addr):
-                await update.message.reply_text("❌ Invalid destination Solana address.")
-                return
-
-            pubkey = WalletManager.get_public_key(user_id)
-            balance = WalletManager.get_sol_balance(pubkey)
-            if balance <= FEE_RESERVE_SOL:
-                await update.message.reply_text(f"❌ Insufficient balance to cover gas fee reserve ({balance:.4f} SOL).")
-                return
-
-            if len(parts) >= 2 and parts[1].lower() != "all":
-                withdraw_amount = parse_positive_float(parts[1], max_val=balance)
-                if withdraw_amount is None:
-                    await update.message.reply_text("❌ Invalid withdrawal amount.")
+            elif state_type == "custom_buy":
+                mint = state["mint"]
+                del USER_STATES[user_id]
+                amount = parse_positive_float(text, max_val=500.0)
+                if amount is None:
+                    await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. 0.35). Type /cancel to abort.")
                     return
-            else:
-                withdraw_amount = balance - FEE_RESERVE_SOL
-
-            if withdraw_amount <= 0 or withdraw_amount > (balance - FEE_RESERVE_SOL):
-                await update.message.reply_text(f"❌ Max withdrawable amount is {balance - FEE_RESERVE_SOL:.4f} SOL.")
+                await execute_buy_action(update, context, user_id, mint, amount)
                 return
 
-            status_msg = await update.message.reply_text(f"⏳ <i>Withdrawing {withdraw_amount:.4f} SOL to {dest_addr[:6]}...{dest_addr[-4:]}...</i>", parse_mode=ParseMode.HTML)
-            kp = WalletManager.get_keypair(user_id)
-            success, sig_or_err = await asyncio.to_thread(WalletManager.transfer_sol, kp, dest_addr, withdraw_amount)
-
-            if success:
-                await status_msg.edit_text(
-                    f"✅ <b>Withdrawal Successful!</b>\n\n"
-                    f"💸 Sent <code>{withdraw_amount:.4f} SOL</code>\n"
-                    f"📬 To: <code>{dest_addr}</code>\n\n"
-                    f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-            else:
-                await status_msg.edit_text(f"❌ Withdrawal failed: {html.escape(sig_or_err)}")
-            return
-
-        # Alpha Wallet Withdraw
-        elif state_type == "alpha_withdraw":
-            del USER_STATES[user_id]
-            if user_id != ACTIVE_ADMIN_ID:
-                return
-
-            parts = text.split()
-            dest_addr = parts[0].strip()
-            if not MarketSniffer.is_valid_solana_address(dest_addr):
-                await update.message.reply_text("❌ Invalid Solana address.")
-                return
-
-            alpha_data = WalletManager.get_or_create_alpha_wallet()
-            balance = WalletManager.get_sol_balance(alpha_data["public_key"])
-            max_sendable = max(0.0, balance - FEE_RESERVE_SOL)
-            if max_sendable <= 0.0001:
-                await update.message.reply_text(f"❌ Insufficient Alpha balance ({balance:.4f} SOL). Need reserve for gas.")
-                return
-
-            withdraw_amount = max_sendable
-            if len(parts) >= 2 and parts[1].lower() != "all":
-                amt_parsed = parse_positive_float(parts[1], max_val=max_sendable)
-                if amt_parsed is not None and amt_parsed <= max_sendable:
-                    withdraw_amount = amt_parsed
-                else:
-                    await update.message.reply_text(f"❌ Requested amount exceeds maximum sendable ({max_sendable:.4f} SOL).")
+            # Withdraw
+            elif state_type == "withdraw":
+                del USER_STATES[user_id]
+                parts = text.split()
+                if len(parts) < 1:
+                    await update.message.reply_text("Usage: <code>&lt;destination_address&gt; [amount_or_all]</code>", parse_mode=ParseMode.HTML)
                     return
 
-            kp = WalletManager.get_alpha_keypair()
-            status_msg = await update.message.reply_text(f"⏳ <i>Sending {withdraw_amount:.4f} SOL from Alpha wallet...</i>", parse_mode=ParseMode.HTML)
-            success, sig_or_err = await asyncio.to_thread(WalletManager.transfer_sol, kp, dest_addr, withdraw_amount)
-            if success:
-                await status_msg.edit_text(
-                    f"👑 <b>Alpha Funds Withdrawn!</b>\n\n"
-                    f"💸 Sent <code>{withdraw_amount:.4f} SOL</code>\n"
-                    f"📬 To: <code>{dest_addr}</code>\n\n"
-                    f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-            else:
-                await status_msg.edit_text(f"❌ Alpha withdrawal failed: {html.escape(sig_or_err)}")
-            return
+                dest_addr = parts[0].strip()
+                if not MarketSniffer.is_valid_solana_address(dest_addr):
+                    await update.message.reply_text("❌ Invalid destination Solana address.")
+                    return
 
-        # Custom SOL to USDT
-        elif state_type == "custom_sol_to_usdt":
-            del USER_STATES[user_id]
-            amt = parse_positive_float(text, max_val=500.0)
-            if amt is None:
-                await update.message.reply_text("❌ Please enter a valid positive SOL amount.")
-                return
-            await execute_sol_to_usdt_action(update, context, user_id, amt)
-            return
+                pubkey = WalletManager.get_public_key(user_id)
+                balance = WalletManager.get_sol_balance(pubkey)
+                if balance <= FEE_RESERVE_SOL:
+                    await update.message.reply_text(f"❌ Insufficient balance to cover gas fee reserve ({balance:.4f} SOL).")
+                    return
 
-        # Custom USDT to SOL
-        elif state_type == "custom_usdt_to_sol":
-            del USER_STATES[user_id]
-            amt = parse_positive_float(text, max_val=50000.0)
-            if amt is None:
-                await update.message.reply_text("❌ Please enter a valid positive USDT amount.")
-                return
-            await execute_usdt_to_sol_action(update, context, user_id, amt)
-            return
-
-        # Import Existing Wallet
-        elif state_type == "import_wallet":
-            del USER_STATES[user_id]
-            delete_failed = False
-            try:
-                # Security: Delete raw private key message from chat immediately
-                await update.message.delete()
-            except Exception:
-                delete_failed = True
-
-            success, pubkey_imported, msg = WalletManager.import_wallet(user_id, text)
-            if success:
-                sol_bal = WalletManager.get_sol_balance(pubkey_imported)
-                usdt_bal = WalletManager.get_usdt_balance(pubkey_imported)
-                warning_notice = ""
-                if delete_failed:
-                    warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Could not automatically delete your message containing the private key. Please manually delete it from this chat immediately for security!</i>"
+                if len(parts) >= 2 and parts[1].lower() != "all":
+                    withdraw_amount = parse_positive_float(parts[1], max_val=balance)
+                    if withdraw_amount is None:
+                        await update.message.reply_text("❌ Invalid withdrawal amount.")
+                        return
                 else:
-                    warning_notice = "\n\n🔒 <i>Your message containing the key was deleted automatically from this chat.</i>"
-                succ_text = (
-                    "🎉 <b>WALLET IMPORTED SUCCESSFULLY!</b>\n\n"
-                    "📬 <b>Connected Address:</b>\n"
-                    f"<code>{pubkey_imported}</code> <i>(tap to copy)</i>\n\n"
-                    f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n\n"
-                    f"🔒 <i>Your private key is secured with AES-256 encryption.</i>{warning_notice}"
-                )
-                _, markup = format_main_menu(user_id)
-                await update.effective_chat.send_message(succ_text, parse_mode=ParseMode.HTML, reply_markup=markup)
-            else:
-                warning_notice = ""
-                if delete_failed:
-                    warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Please manually delete your message containing the private key immediately!</i>"
-                await update.effective_chat.send_message(f"❌ <b>Import Failed:</b> {html.escape(msg)}{warning_notice}\n\nTry again via /import or type /cancel to abort.", parse_mode=ParseMode.HTML)
-            return
+                    withdraw_amount = balance - FEE_RESERVE_SOL
 
-        # Set Target Wallet for Copy Trading
-        elif state_type == "set_target_wallet":
-            del USER_STATES[user_id]
-            target_addr = MarketSniffer.extract_solana_address(text) or text.strip()
-            if not MarketSniffer.is_valid_solana_address(target_addr):
-                await update.message.reply_text("❌ Invalid Solana wallet address. Please provide a valid Base58 address.")
+                if withdraw_amount <= 0 or withdraw_amount > (balance - FEE_RESERVE_SOL):
+                    await update.message.reply_text(f"❌ Max withdrawable amount is {balance - FEE_RESERVE_SOL:.4f} SOL.")
+                    return
+
+                status_msg = await update.message.reply_text(f"⏳ <i>Withdrawing {withdraw_amount:.4f} SOL to {dest_addr[:6]}...{dest_addr[-4:]}...</i>", parse_mode=ParseMode.HTML)
+                kp = WalletManager.get_keypair(user_id)
+                success, sig_or_err = await asyncio.to_thread(WalletManager.transfer_sol, kp, dest_addr, withdraw_amount)
+
+                if success:
+                    await status_msg.edit_text(
+                        f"✅ <b>Withdrawal Successful!</b>\n\n"
+                        f"💸 Sent <code>{withdraw_amount:.4f} SOL</code>\n"
+                        f"📬 To: <code>{dest_addr}</code>\n\n"
+                        f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await status_msg.edit_text(f"❌ Withdrawal failed: {html.escape(sig_or_err)}")
                 return
 
-            SettingsManager.update_user_settings(user_id, {"target_wallet": target_addr, "last_seen_sig": ""})
-            await update.message.reply_text(f"✅ <b>Target Wallet Set!</b>\n<code>{target_addr}</code>\n\nReturning to Copy Trading menu...", parse_mode=ParseMode.HTML)
-            text_out, markup_out = format_copy_menu(user_id)
-            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
-            return
+            # Alpha Wallet Withdraw
+            elif state_type == "alpha_withdraw":
+                del USER_STATES[user_id]
+                if user_id != ACTIVE_ADMIN_ID:
+                    return
 
-        # Set Copy Buy Amount
-        elif state_type == "set_copy_amount":
-            del USER_STATES[user_id]
-            amt = parse_positive_float(text, max_val=100.0)
-            if amt is None:
-                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. <code>0.2</code>).")
+                parts = text.split()
+                dest_addr = parts[0].strip()
+                if not MarketSniffer.is_valid_solana_address(dest_addr):
+                    await update.message.reply_text("❌ Invalid Solana address.")
+                    return
+
+                alpha_data = WalletManager.get_or_create_alpha_wallet()
+                balance = WalletManager.get_sol_balance(alpha_data["public_key"])
+                max_sendable = max(0.0, balance - FEE_RESERVE_SOL)
+                if max_sendable <= 0.0001:
+                    await update.message.reply_text(f"❌ Insufficient Alpha balance ({balance:.4f} SOL). Need reserve for gas.")
+                    return
+
+                withdraw_amount = max_sendable
+                if len(parts) >= 2 and parts[1].lower() != "all":
+                    amt_parsed = parse_positive_float(parts[1], max_val=max_sendable)
+                    if amt_parsed is not None and amt_parsed <= max_sendable:
+                        withdraw_amount = amt_parsed
+                    else:
+                        await update.message.reply_text(f"❌ Requested amount exceeds maximum sendable ({max_sendable:.4f} SOL).")
+                        return
+
+                kp = WalletManager.get_alpha_keypair()
+                status_msg = await update.message.reply_text(f"⏳ <i>Sending {withdraw_amount:.4f} SOL from Alpha wallet...</i>", parse_mode=ParseMode.HTML)
+                success, sig_or_err = await asyncio.to_thread(WalletManager.transfer_sol, kp, dest_addr, withdraw_amount)
+                if success:
+                    await status_msg.edit_text(
+                        f"👑 <b>Alpha Funds Withdrawn!</b>\n\n"
+                        f"💸 Sent <code>{withdraw_amount:.4f} SOL</code>\n"
+                        f"📬 To: <code>{dest_addr}</code>\n\n"
+                        f"🔗 <a href='https://solscan.io/tx/{sig_or_err}'>View on Solscan</a>",
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await status_msg.edit_text(f"❌ Alpha withdrawal failed: {html.escape(sig_or_err)}")
                 return
 
-            SettingsManager.update_user_settings(user_id, {"copy_buy_amount_sol": amt})
-            await update.message.reply_text(f"✅ <b>Copy Buy Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
-            text_out, markup_out = format_copy_menu(user_id)
-            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
-            return
-
-        # Set Copy Slippage
-        elif state_type == "set_copy_slippage":
-            del USER_STATES[user_id]
-            pct = parse_positive_float(text, max_val=50.0)
-            if pct is None:
-                await update.message.reply_text("❌ Please enter a valid slippage percentage (e.g. <code>3.5</code>).")
+            # Custom SOL to USDT
+            elif state_type == "custom_sol_to_usdt":
+                del USER_STATES[user_id]
+                amt = parse_positive_float(text, max_val=500.0)
+                if amt is None:
+                    await update.message.reply_text("❌ Please enter a valid positive SOL amount.")
+                    return
+                await execute_sol_to_usdt_action(update, context, user_id, amt)
                 return
 
-            bps = int(pct * 100)
-            SettingsManager.update_user_settings(user_id, {"slippage_bps": bps})
-            await update.message.reply_text(f"✅ <b>Slippage set to {pct:.1f}% ({bps} BPS)!</b>", parse_mode=ParseMode.HTML)
-            text_out, markup_out = format_copy_menu(user_id)
-            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
-            return
-
-        # Set AI Trade Amount
-        elif state_type == "set_ai_amount":
-            del USER_STATES[user_id]
-            amt = parse_positive_float(text, max_val=100.0)
-            if amt is None:
-                await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. <code>0.1</code>).")
+            # Custom USDT to SOL
+            elif state_type == "custom_usdt_to_sol":
+                del USER_STATES[user_id]
+                amt = parse_positive_float(text, max_val=50000.0)
+                if amt is None:
+                    await update.message.reply_text("❌ Please enter a valid positive USDT amount.")
+                    return
+                await execute_usdt_to_sol_action(update, context, user_id, amt)
                 return
 
-            SettingsManager.update_user_settings(user_id, {"ai_trade_amount_sol": amt})
-            await update.message.reply_text(f"✅ <b>AI Trade Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
-            text_out, markup_out = format_ai_menu(user_id)
-            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
-            return
+            # Import Existing Wallet
+            elif state_type == "import_wallet":
+                del USER_STATES[user_id]
+                delete_failed = False
+                try:
+                    # Security: Delete raw private key message from chat immediately
+                    await update.message.delete()
+                except Exception:
+                    delete_failed = True
 
-        # Set AI TP / SL
-        elif state_type == "set_ai_tpsl":
-            del USER_STATES[user_id]
-            parts = text.split()
-            if len(parts) < 2:
-                await update.message.reply_text("Usage: <code>&lt;take_profit_pct&gt; &lt;stop_loss_pct&gt;</code> (e.g. <code>40 15</code>)", parse_mode=ParseMode.HTML)
+                success, pubkey_imported, msg = WalletManager.import_wallet(user_id, text)
+                if success:
+                    sol_bal = WalletManager.get_sol_balance(pubkey_imported)
+                    usdt_bal = WalletManager.get_usdt_balance(pubkey_imported)
+                    warning_notice = ""
+                    if delete_failed:
+                        warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Could not automatically delete your message containing the private key. Please manually delete it from this chat immediately for security!</i>"
+                    else:
+                        warning_notice = "\n\n🔒 <i>Your message containing the key was deleted automatically from this chat.</i>"
+                    succ_text = (
+                        "🎉 <b>WALLET IMPORTED SUCCESSFULLY!</b>\n\n"
+                        "📬 <b>Connected Address:</b>\n"
+                        f"<code>{pubkey_imported}</code> <i>(tap to copy)</i>\n\n"
+                        f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n\n"
+                        f"🔒 <i>Your private key is secured with AES-256 encryption.</i>{warning_notice}"
+                    )
+                    _, markup = format_main_menu(user_id)
+                    await update.effective_chat.send_message(succ_text, parse_mode=ParseMode.HTML, reply_markup=markup)
+                else:
+                    warning_notice = ""
+                    if delete_failed:
+                        warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Please manually delete your message containing the private key immediately!</i>"
+                    await update.effective_chat.send_message(f"❌ <b>Import Failed:</b> {html.escape(msg)}{warning_notice}\n\nTry again via /import or type /cancel to abort.", parse_mode=ParseMode.HTML)
                 return
 
-            tp = parse_positive_float(parts[0], max_val=1000.0)
-            sl = parse_positive_float(parts[1], max_val=99.0)
-            if tp is None or sl is None:
-                await update.message.reply_text("❌ Invalid TP or SL percentages.")
+            # Set Target Wallet for Copy Trading
+            elif state_type == "set_target_wallet":
+                del USER_STATES[user_id]
+                target_addr = MarketSniffer.extract_solana_address(text) or text.strip()
+                if not MarketSniffer.is_valid_solana_address(target_addr):
+                    await update.message.reply_text("❌ Invalid Solana wallet address. Please provide a valid Base58 address.")
+                    return
+
+                SettingsManager.update_user_settings(user_id, {"target_wallet": target_addr, "last_seen_sig": ""})
+                await update.message.reply_text(f"✅ <b>Target Wallet Set!</b>\n<code>{target_addr}</code>\n\nReturning to Copy Trading menu...", parse_mode=ParseMode.HTML)
+                text_out, markup_out = format_copy_menu(user_id)
+                await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
                 return
 
-            SettingsManager.update_user_settings(user_id, {"ai_take_profit_pct": tp, "ai_stop_loss_pct": sl})
-            await update.message.reply_text(f"✅ <b>AI Take Profit set to +{tp:.0f}%, Stop Loss set to -{sl:.0f}%!</b>", parse_mode=ParseMode.HTML)
-            text_out, markup_out = format_ai_menu(user_id)
-            await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
-            return
+            # Set Copy Buy Amount
+            elif state_type == "set_copy_amount":
+                del USER_STATES[user_id]
+                amt = parse_positive_float(text, max_val=100.0)
+                if amt is None:
+                    await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. <code>0.2</code>).")
+                    return
+
+                SettingsManager.update_user_settings(user_id, {"copy_buy_amount_sol": amt})
+                await update.message.reply_text(f"✅ <b>Copy Buy Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
+                text_out, markup_out = format_copy_menu(user_id)
+                await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+                return
+
+            # Set Copy Slippage
+            elif state_type == "set_copy_slippage":
+                del USER_STATES[user_id]
+                pct = parse_positive_float(text, max_val=50.0)
+                if pct is None:
+                    await update.message.reply_text("❌ Please enter a valid slippage percentage (e.g. <code>3.5</code>).")
+                    return
+
+                bps = int(pct * 100)
+                SettingsManager.update_user_settings(user_id, {"slippage_bps": bps})
+                await update.message.reply_text(f"✅ <b>Slippage set to {pct:.1f}% ({bps} BPS)!</b>", parse_mode=ParseMode.HTML)
+                text_out, markup_out = format_copy_menu(user_id)
+                await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+                return
+
+            # Set AI Trade Amount
+            elif state_type == "set_ai_amount":
+                del USER_STATES[user_id]
+                amt = parse_positive_float(text, max_val=100.0)
+                if amt is None:
+                    await update.message.reply_text("❌ Please enter a valid SOL amount (e.g. <code>0.1</code>).")
+                    return
+
+                SettingsManager.update_user_settings(user_id, {"ai_trade_amount_sol": amt})
+                await update.message.reply_text(f"✅ <b>AI Trade Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
+                text_out, markup_out = format_ai_menu(user_id)
+                await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+                return
+
+            # Set AI TP / SL
+            elif state_type == "set_ai_tpsl":
+                del USER_STATES[user_id]
+                parts = text.split()
+                if len(parts) < 2:
+                    await update.message.reply_text("Usage: <code>&lt;take_profit_pct&gt; &lt;stop_loss_pct&gt;</code> (e.g. <code>40 15</code>)", parse_mode=ParseMode.HTML)
+                    return
+
+                tp = parse_positive_float(parts[0], max_val=1000.0)
+                sl = parse_positive_float(parts[1], max_val=99.0)
+                if tp is None or sl is None:
+                    await update.message.reply_text("❌ Invalid TP or SL percentages.")
+                    return
+
+                SettingsManager.update_user_settings(user_id, {"ai_take_profit_pct": tp, "ai_stop_loss_pct": sl})
+                await update.message.reply_text(f"✅ <b>AI Take Profit set to +{tp:.0f}%, Stop Loss set to -{sl:.0f}%!</b>", parse_mode=ParseMode.HTML)
+                text_out, markup_out = format_ai_menu(user_id)
+                await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
+                return
 
     # 4. Check if text contains a valid Solana CA (direct CA, "CA: ...", DexScreener/Pump URLs)
     if extracted_ca:

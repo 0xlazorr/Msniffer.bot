@@ -122,6 +122,9 @@ class SignalParser:
         if not MarketSniffer.is_valid_solana_address(ca):
             return None, f"Invalid Solana mint address: '{raw_mint}'"
 
+        if ca == getattr(config, "SOL_MINT", "So11111111111111111111111111111111111111112"):
+            return None, "Target mint cannot be native SOL (So11111111111111111111111111111111111111112)."
+
         # Map amount
         raw_amt = (
             data.get("amount")
@@ -143,9 +146,13 @@ class SignalParser:
         if raw_action == "BUY":
             if amt > 1000.0:
                 return None, f"Buy amount {amt} SOL exceeds safety maximum of 1,000 SOL."
+            if amt < 0.001:
+                return None, f"Buy amount {amt} SOL is below minimum trade threshold of 0.001 SOL."
         else:
             if amt > 100.0:
                 return None, f"Sell percentage {amt}% cannot exceed 100%."
+            if amt <= 0.0:
+                return None, "Sell percentage must be greater than 0%."
 
         # Map slippage
         raw_slip = data.get("slippage_bps") or data.get("slippage")
@@ -240,6 +247,9 @@ class SignalParser:
         if not MarketSniffer.is_valid_solana_address(ca):
             return None, f"Invalid Solana address: '{mint}'"
 
+        if ca == getattr(config, "SOL_MINT", "So11111111111111111111111111111111111111112"):
+            return None, "Target mint cannot be native SOL."
+
         amt_str = parts[2].replace("%", "").strip()
         try:
             amt = float(amt_str)
@@ -248,10 +258,16 @@ class SignalParser:
         except ValueError:
             return None, f"Invalid amount '{parts[2]}'."
 
-        if action == "BUY" and amt > 1000.0:
-            return None, "Buy amount exceeds 1,000 SOL safety cap."
-        if action == "SELL" and amt > 100.0:
-            return None, "Sell percentage cannot exceed 100%."
+        if action == "BUY":
+            if amt > 1000.0:
+                return None, "Buy amount exceeds 1,000 SOL safety cap."
+            if amt < 0.001:
+                return None, "Buy amount is below minimum 0.001 SOL threshold."
+        if action == "SELL":
+            if amt > 100.0:
+                return None, "Sell percentage cannot exceed 100%."
+            if amt <= 0.0:
+                return None, "Sell percentage must be greater than 0%."
 
         default_slippage = getattr(config, "DEFAULT_SLIPPAGE_BPS", 300)
         slippage_bps = default_slippage
@@ -681,11 +697,15 @@ class OrchestratorHttpServer:
         self.application = application
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
+        self._cached_bal: float = 0.0
+        self._cached_bal_time: float = 0.0
 
     async def handle_trade_post(self, request: web.Request) -> web.Response:
         """Endpoint: POST /trade or POST /signal"""
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                return web.json_response({"error": "Payload must be a JSON object."}, status=400)
         except Exception:
             return web.json_response({"error": "Invalid JSON body"}, status=400)
 
@@ -714,7 +734,7 @@ class OrchestratorHttpServer:
         admin_id = getattr(config, "ADMIN_USER_ID", 0)
         target_chat = orch_chat_id or admin_id
         tg_status_msg = None
-        if target_chat:
+        if target_chat and self.application and getattr(self.application, "bot", None):
             try:
                 ack_text = format_signal_ack(signal)
                 tg_status_msg = await self.application.bot.send_message(
@@ -730,7 +750,7 @@ class OrchestratorHttpServer:
         success, sig_or_err, quote, duration = await SignalExecutor.execute(signal)
 
         # Update Telegram notification
-        if tg_status_msg and target_chat:
+        if tg_status_msg and target_chat and self.application and getattr(self.application, "bot", None):
             try:
                 result_text, markup = format_signal_result(signal, success, sig_or_err, quote, duration)
                 await tg_status_msg.edit_text(
@@ -761,7 +781,13 @@ class OrchestratorHttpServer:
         exec_id = getattr(config, "ORCHESTRATOR_EXECUTION_USER_ID", 0)
         exec_user = exec_id or admin_id
         pubkey = WalletManager.get_public_key(exec_user)
-        sol_bal = WalletManager.get_sol_balance(pubkey) if pubkey else 0.0
+        now = time.time()
+        if (now - self._cached_bal_time) < 10.0:
+            sol_bal = self._cached_bal
+        else:
+            self._cached_bal_time = now
+            sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey) if pubkey else 0.0
+            self._cached_bal = sol_bal
 
         orch_secret = getattr(config, "ORCHESTRATOR_SECRET", "")
         orch_chat_id = getattr(config, "ORCHESTRATOR_CHAT_ID", 0)
