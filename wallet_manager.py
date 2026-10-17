@@ -35,6 +35,7 @@ class KeystoreCorruptedError(Exception):
 class WalletManager:
     _cipher: Optional[Fernet] = None
     _lock: threading.Lock = threading.Lock()
+    _balance_cache: Dict[str, Tuple[float, float]] = {}
 
     @classmethod
     def _get_cipher(cls) -> Fernet:
@@ -288,9 +289,16 @@ class WalletManager:
     # ----------------------------------------------------
     @classmethod
     def get_sol_balance(cls, public_key: str) -> float:
-        """Fetches live SOL balance via Solana JSON-RPC"""
+        """Fetches live SOL balance via Solana JSON-RPC (with 5s memory cache)"""
         if not public_key:
             return 0.0
+        now = time.time()
+        cache_key = f"sol:{public_key.strip()}"
+        with cls._lock:
+            cached = cls._balance_cache.get(cache_key)
+            if cached and (now - cached[1]) < 5.0:
+                return cached[0]
+
         try:
             # Validate address format before making RPC call
             Pubkey.from_string(public_key.strip())
@@ -307,17 +315,29 @@ class WalletManager:
                     print(f"RPC getBalance error for {public_key}: {data['error']}")
                     return 0.0
                 lamports = data.get("result", {}).get("value", 0)
-                return lamports / 1_000_000_000.0
+                bal = lamports / 1_000_000_000.0
+                with cls._lock:
+                    cls._balance_cache[cache_key] = (bal, now)
+                return bal
         except Exception as e:
             print(f"Error fetching balance for {public_key}: {e}")
         return 0.0
 
     @classmethod
     def get_usdt_balance(cls, public_key: str) -> float:
-        """Fetches live USDT balance in user's wallet"""
+        """Fetches live USDT balance in user's wallet (with 5s memory cache)"""
         if not public_key:
             return 0.0
+        now = time.time()
+        cache_key = f"usdt:{public_key.strip()}"
+        with cls._lock:
+            cached = cls._balance_cache.get(cache_key)
+            if cached and (now - cached[1]) < 5.0:
+                return cached[0]
+
         ui_amount, _ = cls.get_token_balance(public_key, USDT_MINT)
+        with cls._lock:
+            cls._balance_cache[cache_key] = (ui_amount, now)
         return ui_amount
 
     @classmethod

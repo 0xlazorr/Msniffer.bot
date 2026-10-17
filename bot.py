@@ -89,11 +89,11 @@ def parse_positive_float(val: str, max_val: float = 1_000_000.0) -> Optional[flo
         return None
 
 
-def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+async def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Builds clean, simple introduction and main dashboard with active mode badge"""
     pubkey, _ = WalletManager.get_or_create_wallet(user_id)
-    sol_bal = WalletManager.get_sol_balance(pubkey)
-    usdt_bal = WalletManager.get_usdt_balance(pubkey)
+    sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
+    usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey)
 
     settings = SettingsManager.get_user_settings(user_id)
     mode = settings.get("mode", "MANUAL")
@@ -391,7 +391,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /start command"""
     user_id = update.effective_user.id
     USER_STATES.pop(user_id, None)
-    text, markup = format_main_menu(user_id)
+    text, markup = await format_main_menu(user_id)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -415,7 +415,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /cancel command"""
     user_id = update.effective_user.id
     USER_STATES.pop(user_id, None)
-    text, markup = format_main_menu(user_id)
+    text, markup = await format_main_menu(user_id)
     await update.message.reply_text("❌ Action cancelled.\n\n" + text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -446,7 +446,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "The bot will immediately analyze liquidity, honeypot safety, mint/freeze authorities, and provide 1-tap instant buy/sell buttons!\n\n"
         "🔒 <b>Security:</b> All private keys are stored on-server with AES-256 encryption."
     )
-    _, markup = format_main_menu(user_id)
+    _, markup = await format_main_menu(user_id)
     if update.callback_query:
         await update.callback_query.message.reply_text(help_text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
     else:
@@ -606,7 +606,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Handle explicit cancel
     if text.lower() in ("/cancel", "cancel", "stop", "exit"):
         USER_STATES.pop(user_id, None)
-        text_out, markup_out = format_main_menu(user_id)
+        text_out, markup_out = await format_main_menu(user_id)
         await update.message.reply_text("❌ Action cancelled.\n\n" + text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
         return
 
@@ -776,7 +776,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"💰 <b>Balance:</b> <code>{sol_bal:.4f} SOL</code> | <code>{usdt_bal:.2f} USDT</code>\n\n"
                         f"🔒 <i>Your private key is secured with AES-256 encryption.</i>{warning_notice}"
                     )
-                    _, markup = format_main_menu(user_id)
+                    _, markup = await format_main_menu(user_id)
                     await update.effective_chat.send_message(succ_text, parse_mode=ParseMode.HTML, reply_markup=markup)
                 else:
                     warning_notice = ""
@@ -892,7 +892,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Fallback
-    text_out, markup_out = format_main_menu(user_id)
+    text_out, markup_out = await format_main_menu(user_id)
     await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
 
 
@@ -1152,7 +1152,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # 2. Navigation
     if data == "home_menu":
         await safe_answer(query)
-        text, markup = format_main_menu(user_id)
+        text, markup = await format_main_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
@@ -1171,7 +1171,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         pubkey = WalletManager.get_public_key(user_id)
         balance = WalletManager.get_sol_balance(pubkey)
         await safe_answer(query, f"Balance: {balance:.4f} SOL", show_alert=True)
-        text, markup = format_main_menu(user_id)
+        text, markup = await format_main_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
@@ -1787,6 +1787,7 @@ def main():
 
     # Handlers
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("menu", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("wallet", wallet_command))
     app.add_handler(CommandHandler("swap", swap_command))
