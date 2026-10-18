@@ -57,25 +57,30 @@ USER_STATES: Dict[int, Dict[str, Any]] = {}
 # Active admin ID
 ACTIVE_ADMIN_ID = ADMIN_USER_ID
 
-USER_ACTIVE_TRADES: set[int] = set()
+USER_ACTIVE_TRADES: Dict[int, float] = {}
 
 
 class UserTradeLock:
-    """Async context manager to prevent concurrent/spam trade execution per user"""
+    """Async context manager to prevent concurrent/spam trade execution per user with 45s stale auto-release"""
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.acquired = False
 
     async def __aenter__(self):
+        now = time.time()
+        # Auto-clear stale locks older than 45 seconds
         if self.user_id in USER_ACTIVE_TRADES:
-            return False
-        USER_ACTIVE_TRADES.add(self.user_id)
+            if (now - USER_ACTIVE_TRADES[self.user_id]) > 45.0:
+                USER_ACTIVE_TRADES.pop(self.user_id, None)
+            else:
+                return False
+        USER_ACTIVE_TRADES[self.user_id] = now
         self.acquired = True
         return True
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.acquired:
-            USER_ACTIVE_TRADES.discard(self.user_id)
+            USER_ACTIVE_TRADES.pop(self.user_id, None)
 
 
 def parse_positive_float(val: str, max_val: float = 1_000_000.0) -> Optional[float]:
@@ -136,13 +141,13 @@ async def format_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return text, markup
 
 
-def format_swap_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Builds the SOL <-> USDT quick swap interface"""
-    pubkey = WalletManager.get_public_key(user_id)
+async def format_swap_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds the SOL <-> USDT quick swap interface asynchronously"""
+    pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
     if not pubkey:
-        pubkey, _ = WalletManager.get_or_create_wallet(user_id)
-    sol_bal = WalletManager.get_sol_balance(pubkey)
-    usdt_bal = WalletManager.get_usdt_balance(pubkey)
+        pubkey, _ = await asyncio.to_thread(WalletManager.get_or_create_wallet, user_id)
+    sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
+    usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey)
 
     text = (
         "⚡ <b>Quick Swap (SOL ⇄ USDT)</b>\n\n"
@@ -211,10 +216,10 @@ def format_copy_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return text, markup
 
 
-def format_ai_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Displays AI Council Integration Status (replacing redundant legacy local AI autopilot)."""
-    pubkey = WalletManager.get_public_key(user_id)
-    sol_bal = WalletManager.get_sol_balance(pubkey) if pubkey else 0.0
+async def format_ai_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Displays AI Council Integration Status asynchronously without blocking event loop."""
+    pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+    sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey) if pubkey else 0.0
 
     text = (
         "🏛️ <b>CHATTERS AI COUNCIL INTEGRATION</b>\n"
@@ -244,14 +249,14 @@ def format_ai_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return text, markup
 
 
-def format_positions_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Builds portfolio and token positions dashboard"""
-    pubkey = WalletManager.get_public_key(user_id)
+async def format_positions_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds portfolio and token positions dashboard asynchronously without blocking the event loop"""
+    pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
     if not pubkey:
-        pubkey, _ = WalletManager.get_or_create_wallet(user_id)
+        pubkey, _ = await asyncio.to_thread(WalletManager.get_or_create_wallet, user_id)
 
-    sol_bal = WalletManager.get_sol_balance(pubkey)
-    all_positions = WalletManager.get_all_positions(pubkey)
+    sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
+    all_positions = await asyncio.to_thread(WalletManager.get_all_positions, pubkey)
 
     # Filter out dust (ui_amount < 0.000001)
     active_positions = [p for p in all_positions if p.get("ui_amount", 0.0) > 0.000001]
@@ -269,11 +274,18 @@ def format_positions_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         lines.append("\n💡 <i>Paste any Token CA or DexScreener link to sniff and buy!</i>")
     else:
         lines.append("📊 <b>Open Token Holdings:</b>")
-        for pos in active_positions[:6]:
+        async def fetch_pos_market_info(pos):
+            mint = pos["mint"]
+            info = await asyncio.to_thread(MarketSniffer.get_market_data, mint)
+            return pos, info
+
+        results = await asyncio.gather(*[fetch_pos_market_info(p) for p in active_positions[:6]], return_exceptions=True)
+        for item in results:
+            if isinstance(item, Exception):
+                continue
+            pos, market_info = item
             mint = pos["mint"]
             ui_amt = pos["ui_amount"]
-
-            market_info = MarketSniffer.get_market_data(mint)
             symbol = market_info.get("symbol", "TOKEN") if market_info else "TOKEN"
             price_usd = market_info.get("price_usd", 0.0) if market_info else 0.0
             val_usd = ui_amt * price_usd
@@ -399,7 +411,7 @@ async def swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /swap command"""
     user_id = update.effective_user.id
     USER_STATES.pop(user_id, None)
-    text, markup = format_swap_menu(user_id)
+    text, markup = await format_swap_menu(user_id)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -407,7 +419,7 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /positions command"""
     user_id = update.effective_user.id
     USER_STATES.pop(user_id, None)
-    text, markup = format_positions_menu(user_id)
+    text, markup = await format_positions_menu(user_id)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
 
 
@@ -465,7 +477,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /ai command"""
     user_id = update.effective_user.id
     USER_STATES.pop(user_id, None)
-    text, markup = format_ai_menu(user_id)
+    text, markup = await format_ai_menu(user_id)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -495,9 +507,9 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     USER_STATES.pop(user_id, None)
-    pubkey, _ = WalletManager.get_or_create_wallet(user_id)
-    sol_bal = WalletManager.get_sol_balance(pubkey)
-    usdt_bal = WalletManager.get_usdt_balance(pubkey)
+    pubkey, _ = await asyncio.to_thread(WalletManager.get_or_create_wallet, user_id)
+    sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
+    usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey)
 
     msg_text = (
         "💳 <b>Market Sniffer Wallet</b>\n\n"
@@ -560,9 +572,9 @@ async def alpha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     USER_STATES.pop(user_id, None)
-    alpha_data = WalletManager.get_or_create_alpha_wallet()
+    alpha_data = await asyncio.to_thread(WalletManager.get_or_create_alpha_wallet)
     alpha_pub = alpha_data["public_key"]
-    balance = WalletManager.get_sol_balance(alpha_pub)
+    balance = await asyncio.to_thread(WalletManager.get_sol_balance, alpha_pub)
 
     text = (
         "👑 <b>ALPHA WALLET DASHBOARD</b>\n"
@@ -651,8 +663,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Invalid destination Solana address.")
                     return
 
-                pubkey = WalletManager.get_public_key(user_id)
-                balance = WalletManager.get_sol_balance(pubkey)
+                pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+                balance = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
                 if balance <= FEE_RESERVE_SOL:
                     await update.message.reply_text(f"❌ Insufficient balance to cover gas fee reserve ({balance:.4f} SOL).")
                     return
@@ -698,8 +710,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Invalid Solana address.")
                     return
 
-                alpha_data = WalletManager.get_or_create_alpha_wallet()
-                balance = WalletManager.get_sol_balance(alpha_data["public_key"])
+                alpha_data = await asyncio.to_thread(WalletManager.get_or_create_alpha_wallet)
+                balance = await asyncio.to_thread(WalletManager.get_sol_balance, alpha_data["public_key"])
                 max_sendable = max(0.0, balance - FEE_RESERVE_SOL)
                 if max_sendable <= 0.0001:
                     await update.message.reply_text(f"❌ Insufficient Alpha balance ({balance:.4f} SOL). Need reserve for gas.")
@@ -762,8 +774,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 success, pubkey_imported, msg = WalletManager.import_wallet(user_id, text)
                 if success:
-                    sol_bal = WalletManager.get_sol_balance(pubkey_imported)
-                    usdt_bal = WalletManager.get_usdt_balance(pubkey_imported)
+                    sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey_imported)
+                    usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey_imported)
                     warning_notice = ""
                     if delete_failed:
                         warning_notice = "\n\n⚠️ <b>SECURITY ALERT:</b> <i>Could not automatically delete your message containing the private key. Please manually delete it from this chat immediately for security!</i>"
@@ -838,7 +850,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 SettingsManager.update_user_settings(user_id, {"ai_trade_amount_sol": amt})
                 await update.message.reply_text(f"✅ <b>AI Trade Size set to {amt} SOL!</b>", parse_mode=ParseMode.HTML)
-                text_out, markup_out = format_ai_menu(user_id)
+                text_out, markup_out = await format_ai_menu(user_id)
                 await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
                 return
 
@@ -858,7 +870,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 SettingsManager.update_user_settings(user_id, {"ai_take_profit_pct": tp, "ai_stop_loss_pct": sl})
                 await update.message.reply_text(f"✅ <b>AI Take Profit set to +{tp:.0f}%, Stop Loss set to -{sl:.0f}%!</b>", parse_mode=ParseMode.HTML)
-                text_out, markup_out = format_ai_menu(user_id)
+                text_out, markup_out = await format_ai_menu(user_id)
                 await update.message.reply_text(text_out, parse_mode=ParseMode.HTML, reply_markup=markup_out)
                 return
 
@@ -872,9 +884,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             report = await asyncio.to_thread(MarketSniffer.sniff, mint)
-            pubkey, _ = WalletManager.get_or_create_wallet(user_id)
-            sol_bal = WalletManager.get_sol_balance(pubkey)
-            token_bal, _ = WalletManager.get_token_balance(pubkey, mint)
+            pubkey, _ = await asyncio.to_thread(WalletManager.get_or_create_wallet, user_id)
+            sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
+            token_bal, _ = await asyncio.to_thread(WalletManager.get_token_balance, pubkey, mint)
 
             msg_text = format_audit_message(report, sol_bal, token_bal)
             pair_url = (report.get("market") or {}).get("pair_url", f"https://dexscreener.com/solana/{mint}")
@@ -917,8 +929,8 @@ async def execute_buy_action(
                 await update.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
             return
 
-        pubkey = WalletManager.get_public_key(user_id)
-        balance = WalletManager.get_sol_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        balance = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
 
         needed_sol = amount_sol + FEE_RESERVE_SOL
         if balance < needed_sol:
@@ -1015,8 +1027,8 @@ async def execute_sol_to_usdt_action(
                 await update.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
             return
 
-        pubkey = WalletManager.get_public_key(user_id)
-        balance = WalletManager.get_sol_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        balance = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
 
         needed_sol = amount_sol + FEE_RESERVE_SOL
         if balance < needed_sol:
@@ -1070,8 +1082,8 @@ async def execute_usdt_to_sol_action(
                 await update.message.reply_text(warn_msg, parse_mode=ParseMode.HTML)
             return
 
-        pubkey = WalletManager.get_public_key(user_id)
-        usdt_bal = WalletManager.get_usdt_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey)
 
         if usdt_bal < amount_usdt:
             err_msg = f"❌ Insufficient USDT balance ({usdt_bal:.2f} USDT available)."
@@ -1158,7 +1170,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "swap_menu":
         await safe_answer(query)
-        text, markup = format_swap_menu(user_id)
+        text, markup = await format_swap_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
@@ -1168,8 +1180,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "refresh_balance":
-        pubkey = WalletManager.get_public_key(user_id)
-        balance = WalletManager.get_sol_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        balance = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
         await safe_answer(query, f"Balance: {balance:.4f} SOL", show_alert=True)
         text, markup = await format_main_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -1177,7 +1189,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     if data == "positions_menu":
         await safe_answer(query)
-        text, markup = format_positions_menu(user_id)
+        text, markup = await format_positions_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
         return
 
@@ -1237,13 +1249,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # 4. AI Trading Callbacks
     if data == "ai_menu":
         await safe_answer(query)
-        text, markup = format_ai_menu(user_id)
+        text, markup = await format_ai_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if data == "toggle_ai_mode" or data.startswith("set_ai_strat:") or data in ("prompt_set_ai_amount", "prompt_set_ai_tpsl"):
         await safe_answer(query, "🏛️ AI Autopilot & Deliberation is managed exclusively by Chatters AI Council (/auto).", show_alert=True)
-        text, markup = format_ai_menu(user_id)
+        text, markup = await format_ai_menu(user_id)
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
@@ -1267,8 +1279,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 3. Swap SOL -> USDT sub-menu
     if data == "swap_sol_to_usdt_menu":
-        pubkey = WalletManager.get_public_key(user_id)
-        sol_bal = WalletManager.get_sol_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
         text = (
             "🔄 <b>Swap SOL ➡️ USDT</b>\n\n"
             f"💰 Available: <code>{sol_bal:.4f} SOL</code>\n\n"
@@ -1293,8 +1305,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 4. Swap USDT -> SOL sub-menu
     if data == "swap_usdt_to_sol_menu":
-        pubkey = WalletManager.get_public_key(user_id)
-        usdt_bal = WalletManager.get_usdt_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey)
         text = (
             "🔄 <b>Swap USDT ➡️ SOL</b>\n\n"
             f"💵 Available: <code>{usdt_bal:.2f} USDT</code>\n\n"
@@ -1332,8 +1344,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Execute quick USDT -> SOL
     if data.startswith("do_swap_usdt_sol:"):
         code = data.split(":", 1)[1]
-        pubkey = WalletManager.get_public_key(user_id)
-        usdt_bal = WalletManager.get_usdt_balance(pubkey)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        usdt_bal = await asyncio.to_thread(WalletManager.get_usdt_balance, pubkey)
         if code == "25pct":
             amt = usdt_bal * 0.25
         elif code == "50pct":
@@ -1456,10 +1468,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("refresh:"):
         await safe_answer(query)
         mint = data.split(":", 1)[1]
-        report = MarketSniffer.sniff(mint)
-        pubkey = WalletManager.get_public_key(user_id)
-        sol_bal = WalletManager.get_sol_balance(pubkey)
-        token_bal, _ = WalletManager.get_token_balance(pubkey, mint)
+        report = await asyncio.to_thread(MarketSniffer.sniff, mint)
+        pubkey = await asyncio.to_thread(WalletManager.get_public_key, user_id)
+        sol_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
+        token_bal, _ = await asyncio.to_thread(WalletManager.get_token_balance, pubkey, mint)
 
         msg_text = format_audit_message(report, sol_bal, token_bal)
         markup = build_audit_markup(mint, report["market"]["pair_url"], has_token_balance=(token_bal > 0))
@@ -1472,7 +1484,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         mint = data.split(":", 1)[1]
         settings = SettingsManager.get_user_settings(user_id)
         strategy = settings.get("ai_strategy", "BALANCED")
-        eval_res = AITradingEngine.evaluate_token(mint, strategy=strategy)
+        eval_res = await asyncio.to_thread(AITradingEngine.evaluate_token, mint, strategy=strategy)
         decision = eval_res.get("decision", "SKIP")
         confidence = eval_res.get("confidence", 0.0) * 100
         reason = eval_res.get("reason", "N/A")
@@ -1581,7 +1593,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 await safe_answer(query, "⚠️ Admin actions are only available in direct private chat with the bot.", show_alert=True)
                 return
             await safe_answer(query)
-            alpha_data = WalletManager.get_or_create_alpha_wallet()
+            alpha_data = await asyncio.to_thread(WalletManager.get_or_create_alpha_wallet)
             pk = alpha_data["private_key_b58"]
             text = (
                 "👑 <b>Alpha Wallet Private Key (Phantom Import):</b>\n\n"
@@ -1776,10 +1788,18 @@ def main():
         write_timeout=30.0,
         pool_timeout=30.0,
     )
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=15.0,
+        read_timeout=35.0,
+        write_timeout=15.0,
+        pool_timeout=20.0,
+    )
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .request(request)
+        .get_updates_request(get_updates_request)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -1815,10 +1835,10 @@ def main():
 
     print("📡 Connecting Market Sniffer to Telegram...")
     app.run_polling(
-        drop_pending_updates=True,
+        drop_pending_updates=False,
         bootstrap_retries=-1,
         timeout=20,
-        poll_interval=1.0,
+        poll_interval=0.5,
     )
 
 

@@ -34,8 +34,36 @@ class KeystoreCorruptedError(Exception):
 
 class WalletManager:
     _cipher: Optional[Fernet] = None
-    _lock: threading.Lock = threading.Lock()
+    _lock: threading.RLock = threading.RLock()
     _balance_cache: Dict[str, Tuple[float, float]] = {}
+    _token_balance_cache: Dict[str, Tuple[Tuple[float, int], float]] = {}
+    _positions_cache: Dict[str, Tuple[List[Dict[str, Any]], float]] = {}
+
+    @classmethod
+    def _post_rpc(cls, payload: dict, timeout: float = 6.0) -> Optional[dict]:
+        """
+        Sends JSON-RPC request with automatic failover across multiple public RPCs.
+        Handles 429 rate limits, network timeouts, and node unresponsiveness.
+        """
+        endpoints = [RPC_ENDPOINT]
+        fallback = "https://solana-rpc.publicnode.com"
+        if fallback != RPC_ENDPOINT:
+            endpoints.append(fallback)
+
+        for ep in endpoints:
+            try:
+                res = requests.post(ep, json=payload, timeout=timeout)
+                if res.status_code == 200:
+                    data = res.json()
+                    # Check if node returned rate-limit code
+                    if "error" in data and data.get("error", {}).get("code") == -32005:
+                        continue
+                    return data
+                elif res.status_code in (429, 502, 503, 504):
+                    continue
+            except Exception:
+                continue
+        return None
 
     @classmethod
     def _get_cipher(cls) -> Fernet:
@@ -289,7 +317,7 @@ class WalletManager:
     # ----------------------------------------------------
     @classmethod
     def get_sol_balance(cls, public_key: str) -> float:
-        """Fetches live SOL balance via Solana JSON-RPC (with 5s memory cache)"""
+        """Fetches live SOL balance via Solana JSON-RPC (with 5s memory cache & RPC failover)"""
         if not public_key:
             return 0.0
         now = time.time()
@@ -308,19 +336,23 @@ class WalletManager:
                 "method": "getBalance",
                 "params": [public_key.strip(), {"commitment": "confirmed"}],
             }
-            res = requests.post(RPC_ENDPOINT, json=payload, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                if "error" in data:
-                    print(f"RPC getBalance error for {public_key}: {data['error']}")
-                    return 0.0
+            data = cls._post_rpc(payload, timeout=6.0)
+            if data and "result" in data:
                 lamports = data.get("result", {}).get("value", 0)
                 bal = lamports / 1_000_000_000.0
                 with cls._lock:
                     cls._balance_cache[cache_key] = (bal, now)
                 return bal
+            elif data and "error" in data:
+                print(f"RPC getBalance error for {public_key}: {data['error']}")
         except Exception as e:
             print(f"Error fetching balance for {public_key}: {e}")
+
+        # Return stale cached balance if RPC blipped
+        with cls._lock:
+            cached = cls._balance_cache.get(cache_key)
+            if cached:
+                return cached[0]
         return 0.0
 
     @classmethod
@@ -343,12 +375,19 @@ class WalletManager:
     @classmethod
     def get_token_balance(cls, wallet_pubkey: str, token_mint: str) -> Tuple[float, int]:
         """
-        Fetches balance and raw amount for a specific SPL token in user's wallet.
+        Fetches balance and raw amount for a specific SPL token in user's wallet (with 5s memory cache & RPC failover).
         Sums across all token accounts to handle multiple accounts correctly.
         Returns (ui_amount, raw_amount).
         """
         if not wallet_pubkey or not token_mint:
             return 0.0, 0
+        now = time.time()
+        cache_key = f"tok:{wallet_pubkey.strip()}:{token_mint.strip()}"
+        with cls._lock:
+            cached = cls._token_balance_cache.get(cache_key)
+            if cached and (now - cached[1]) < 5.0:
+                return cached[0]
+
         try:
             Pubkey.from_string(wallet_pubkey.strip())
             Pubkey.from_string(token_mint.strip())
@@ -362,28 +401,43 @@ class WalletManager:
                     {"encoding": "jsonParsed"},
                 ],
             }
-            res = requests.post(RPC_ENDPOINT, json=payload, timeout=8)
-            if res.status_code == 200:
-                accounts = res.json().get("result", {}).get("value", [])
+            data = cls._post_rpc(payload, timeout=6.0)
+            if data and "result" in data:
+                accounts = data.get("result", {}).get("value", [])
                 total_ui = 0.0
                 total_raw = 0
                 for acc in accounts:
                     info = acc.get("account", {}).get("data", {}).get("parsed", {}).get("info", {}).get("tokenAmount", {})
                     total_ui += float(info.get("uiAmount") or 0.0)
                     total_raw += int(info.get("amount") or 0)
-                return total_ui, total_raw
+                res_tuple = (total_ui, total_raw)
+                with cls._lock:
+                    cls._token_balance_cache[cache_key] = (res_tuple, now)
+                return res_tuple
         except Exception as e:
             print(f"Error fetching token balance: {e}")
+
+        with cls._lock:
+            cached = cls._token_balance_cache.get(cache_key)
+            if cached:
+                return cached[0]
         return 0.0, 0
 
     @classmethod
     def get_all_positions(cls, wallet_pubkey: str) -> List[Dict[str, Any]]:
         """
-        Queries all token positions for the wallet across both SPL Token and Token-2022 programs.
+        Queries all token positions for the wallet across both SPL Token and Token-2022 programs (with 5s memory cache & RPC failover).
         Returns list of non-zero positions: [{"mint": str, "ui_amount": float, "raw_amount": int, "decimals": int}].
         """
         if not wallet_pubkey:
             return []
+        now = time.time()
+        cache_key = f"pos:{wallet_pubkey.strip()}"
+        with cls._lock:
+            cached = cls._positions_cache.get(cache_key)
+            if cached and (now - cached[1]) < 5.0:
+                return cached[0]
+
         programs = [
             "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token Program
             "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022 Program
@@ -402,9 +456,9 @@ class WalletManager:
                         {"encoding": "jsonParsed"},
                     ],
                 }
-                res = requests.post(RPC_ENDPOINT, json=payload, timeout=8)
-                if res.status_code == 200:
-                    accounts = res.json().get("result", {}).get("value", [])
+                data = cls._post_rpc(payload, timeout=6.0)
+                if data and "result" in data:
+                    accounts = data.get("result", {}).get("value", [])
                     for acc in accounts:
                         info = acc.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
                         mint = info.get("mint")
@@ -427,12 +481,15 @@ class WalletManager:
             except Exception as e:
                 print(f"Error querying positions for {prog_id}: {e}")
 
-        return list(positions.values())
+        res_list = list(positions.values())
+        with cls._lock:
+            cls._positions_cache[cache_key] = (res_list, now)
+        return res_list
 
     @classmethod
-    def confirm_transaction(cls, signature: str, max_timeout_sec: int = 25) -> Tuple[bool, str]:
+    def confirm_transaction(cls, signature: str, max_timeout_sec: int = 20) -> Tuple[bool, str]:
         """
-        Actively confirms transaction on-chain via getSignatureStatuses.
+        Actively confirms transaction on-chain via getSignatureStatuses with failover RPC.
         Ensures transactions aren't falsely reported as successful when reverted.
         """
         start_time = time.time()
@@ -447,9 +504,9 @@ class WalletManager:
                         {"searchTransactionHistory": True},
                     ],
                 }
-                res = requests.post(RPC_ENDPOINT, json=payload, timeout=6)
-                if res.status_code == 200:
-                    val_list = res.json().get("result", {}).get("value", [])
+                data = cls._post_rpc(payload, timeout=5.0)
+                if data and "result" in data:
+                    val_list = data.get("result", {}).get("value", [])
                     if val_list and val_list[0] is not None:
                         status = val_list[0]
                         err = status.get("err")
@@ -466,7 +523,7 @@ class WalletManager:
                             return True, signature
             except Exception:
                 pass
-            time.sleep(1.5)
+            time.sleep(1.0)
 
         return False, f"Transaction confirmation timed out. Check signature: {signature}"
 
@@ -479,7 +536,7 @@ class WalletManager:
         wait_confirmation: bool = True,
     ) -> Tuple[bool, str]:
         """
-        Transfers SOL from sender to recipient address on-chain with exact rounding.
+        Transfers SOL from sender to recipient address on-chain with exact rounding and failover RPC.
         """
         try:
             recipient_pubkey = Pubkey.from_string(recipient_address.strip())
@@ -494,10 +551,10 @@ class WalletManager:
                 "method": "getLatestBlockhash",
                 "params": [{"commitment": "confirmed"}],
             }
-            bh_res = requests.post(RPC_ENDPOINT, json=bh_payload, timeout=8)
-            bh_data = bh_res.json()
-            if "error" in bh_data:
-                return False, bh_data["error"].get("message", "Failed to fetch blockhash")
+            bh_data = cls._post_rpc(bh_payload, timeout=6.0)
+            if not bh_data or "error" in bh_data:
+                err_msg = bh_data.get("error", {}).get("message", "Failed to fetch blockhash") if bh_data else "RPC timeout"
+                return False, err_msg
             res_val = bh_data.get("result", {}).get("value")
             if not res_val or not res_val.get("blockhash"):
                 return False, "Failed to retrieve valid blockhash from Solana RPC"
@@ -523,18 +580,16 @@ class WalletManager:
                 "method": "sendTransaction",
                 "params": [serialized_tx, {"encoding": "base64", "preflightCommitment": "confirmed"}],
             }
-            send_res = requests.post(RPC_ENDPOINT, json=send_payload, timeout=10)
-            res_json = send_res.json()
-
-            if "result" in res_json:
+            res_json = cls._post_rpc(send_payload, timeout=8.0)
+            if res_json and "result" in res_json:
                 sig = res_json["result"]
                 if wait_confirmation:
                     return cls.confirm_transaction(sig)
                 return True, sig
-            elif "error" in res_json:
+            elif res_json and "error" in res_json:
                 return False, res_json["error"].get("message", "RPC error")
             else:
-                return False, "Unknown RPC response"
+                return False, "Failed to broadcast transaction to Solana RPC"
         except Exception as e:
             return False, str(e)
 

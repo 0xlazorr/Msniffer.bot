@@ -1,6 +1,8 @@
 import re
+import time
+import threading
 import requests
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from solders.pubkey import Pubkey
 
 DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/{}"
@@ -26,6 +28,9 @@ def format_currency(val: Optional[float], is_usd: bool = True) -> str:
 
 
 class MarketSniffer:
+    _market_cache: Dict[str, Tuple[Optional[Dict[str, Any]], float]] = {}
+    _audit_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+    _cache_lock: threading.RLock = threading.RLock()
     @staticmethod
     def is_valid_solana_address(address: str) -> bool:
         """Validates if a string is a valid Solana Base58 public key"""
@@ -61,14 +66,23 @@ class MarketSniffer:
                 continue
         return None
 
-    @staticmethod
-    def get_market_data(mint: str) -> Optional[Dict[str, Any]]:
+    @classmethod
+    def get_market_data(cls, mint: str) -> Optional[Dict[str, Any]]:
         """
-        Fetches live market metrics from DexScreener strictly for Solana pairs.
+        Fetches live market metrics from DexScreener strictly for Solana pairs (with 15s memory cache).
         """
+        if not mint:
+            return None
+        mint_clean = mint.strip()
+        now = time.time()
+        with cls._cache_lock:
+            cached = cls._market_cache.get(mint_clean)
+            if cached and (now - cached[1]) < 15.0:
+                return cached[0]
+
         try:
-            url = DEXSCREENER_URL.format(mint.strip())
-            res = requests.get(url, headers=HEADERS, timeout=8)
+            url = DEXSCREENER_URL.format(mint_clean)
+            res = requests.get(url, headers=HEADERS, timeout=5)
             if res.status_code != 200:
                 return None
             data = res.json()
@@ -116,9 +130,9 @@ class MarketSniffer:
             buys_m5 = int(m5_txns.get("buys") or 0)
             sells_m5 = int(m5_txns.get("sells") or 0)
 
-            pair_url = best_pair.get("url") or f"https://dexscreener.com/solana/{mint}"
+            pair_url = best_pair.get("url") or f"https://dexscreener.com/solana/{mint_clean}"
 
-            return {
+            res_data = {
                 "name": name,
                 "symbol": symbol,
                 "price_usd": price_usd,
@@ -136,8 +150,15 @@ class MarketSniffer:
                 "pair_url": pair_url,
                 "dex": best_pair.get("dexId", "Raydium"),
             }
+            with cls._cache_lock:
+                cls._market_cache[mint_clean] = (res_data, now)
+            return res_data
         except Exception as e:
             print(f"Error fetching DexScreener market data: {e}")
+            with cls._cache_lock:
+                cached = cls._market_cache.get(mint_clean)
+                if cached:
+                    return cached[0]
             return None
 
     @classmethod
@@ -168,12 +189,19 @@ class MarketSniffer:
                 print(f"Error scanning trending mints from {url}: {e}")
         return mints
 
-    @staticmethod
-    def get_security_audit(mint: str) -> Dict[str, Any]:
+    @classmethod
+    def get_security_audit(cls, mint: str) -> Dict[str, Any]:
         """
-        Audits token security via RugCheck API.
+        Audits token security via RugCheck API (with 30s memory cache).
         Verifies freeze authority, mint authority, top holders, and risk factors.
         """
+        mint_clean = mint.strip()
+        now = time.time()
+        with cls._cache_lock:
+            cached = cls._audit_cache.get(mint_clean)
+            if cached and (now - cached[1]) < 30.0:
+                return cached[0]
+
         audit = {
             "mint_authority": "Unknown",
             "freeze_authority": "Unknown",
@@ -186,8 +214,8 @@ class MarketSniffer:
         }
 
         try:
-            url = RUGCHECK_URL.format(mint.strip())
-            res = requests.get(url, headers=HEADERS, timeout=8)
+            url = RUGCHECK_URL.format(mint_clean)
+            res = requests.get(url, headers=HEADERS, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 token_info = data.get("token") or {}
@@ -255,6 +283,8 @@ class MarketSniffer:
             audit["risk_tag"] = "UNVERIFIED"
             audit["warnings"].append("⚠️ Could not reach security auditor. Verify CA manually before trading.")
 
+        with cls._cache_lock:
+            cls._audit_cache[mint_clean] = (audit, now)
         return audit
 
     @classmethod

@@ -25,7 +25,7 @@ from jupiter_swap import JupiterSwapEngine
 
 class SettingsManager:
     """Manages encrypted user modes and settings (Copy Trading & AI Autopilot) atomically"""
-    _lock = threading.Lock()
+    _lock = threading.RLock()
 
     @classmethod
     def _load_all(cls) -> Dict[str, dict]:
@@ -142,7 +142,7 @@ class CopyTradingEngine:
     # FIFO cache of recent signatures to prevent duplicate trade executions
     _seen_signatures_set = set()
     _seen_signatures_order = deque(maxlen=600)
-    _lock = threading.Lock()
+    _lock = threading.RLock()
 
     @classmethod
     def parse_target_swap(cls, target_wallet: str, tx_data: dict) -> Optional[dict]:

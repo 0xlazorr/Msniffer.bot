@@ -379,7 +379,7 @@ class SignalExecutor:
             keypair = WalletManager.get_keypair(exec_user_id)
             if not keypair:
                 # Attempt to generate or load
-                WalletManager.get_or_create_wallet(exec_user_id)
+                await asyncio.to_thread(WalletManager.get_or_create_wallet, exec_user_id)
                 keypair = WalletManager.get_keypair(exec_user_id)
                 if not keypair:
                     return False, "Could not load Solana keypair for execution wallet.", None, time.time() - start_time
@@ -388,7 +388,7 @@ class SignalExecutor:
 
             # BUY Execution
             if signal.action == "BUY":
-                current_bal = WalletManager.get_sol_balance(pubkey)
+                current_bal = await asyncio.to_thread(WalletManager.get_sol_balance, pubkey)
                 needed = signal.amount + fee_reserve
                 if current_bal < needed:
                     return (
@@ -427,7 +427,7 @@ class SignalExecutor:
 
             # SELL Execution
             elif signal.action == "SELL":
-                ui_bal, raw_bal = WalletManager.get_token_balance(pubkey, signal.mint)
+                ui_bal, raw_bal = await asyncio.to_thread(WalletManager.get_token_balance, pubkey, signal.mint)
                 if raw_bal <= 0:
                     return (
                         False,
